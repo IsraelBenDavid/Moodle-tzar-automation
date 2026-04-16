@@ -781,62 +781,74 @@ function fillExtensionForm(daysToAdd) {
 
 async function postForumReply(request, days, sesskey) {
   try {
-    const postId = request.postId;
-    const origin = new URL(currentForumUrl).origin;
-
+    const urlObj = new URL(currentForumUrl);
+    const basePath = urlObj.pathname.split('/mod/')[0];
+    
     let discussionId = null;
     let discussUrl = null;
 
-    const discrowMatch = postId && postId.match(/^discrow_(\d+)$/);
+    const discrowMatch = request.postId && request.postId.match(/^discrow_(\d+)$/);
     if (discrowMatch) {
       discussionId = discrowMatch[1];
-      discussUrl = `${origin}/mod/forumng/discuss.php?d=${discussionId}`;
+      discussUrl = `${urlObj.origin}${basePath}/mod/forumng/discuss.php?d=${discussionId}`;
     } else if (currentForumUrl.includes('discuss.php')) {
-      discussionId = new URL(currentForumUrl).searchParams.get('d');
+      discussionId = urlObj.searchParams.get('d');
       discussUrl = currentForumUrl;
     }
 
     if (!discussionId || !discussUrl) {
-      return { success: false, error: 'Cannot determine forum discussion ID' };
+      return { success: false, error: 'Cannot determine forum discussion URL' };
     }
 
     const newTab = await chrome.tabs.create({ url: discussUrl, active: false });
     await waitForTabLoad(newTab.id);
 
-    // Pass the message externally to keep the injected code block strictly English
-    const replyMessage = "\u05e9\u05dc\u05d5\u05dd " + request.studentName + ", \u05d4\u05d5\u05d6\u05e0\u05d4 \u05dc\u05da \u05d4\u05d0\u05e8\u05db\u05d4 \u05e9\u05dc " + days + " \u05d9\u05de\u05d9\u05dd \u05dc\u05d4\u05d2\u05e9\u05ea \u05d4\u05ea\u05e8\u05d2\u05d9\u05dc. \u05d1\u05d4\u05e6\u05dc\u05d7\u05d4.";
+    const msgStr = '\u05e9\u05dc\u05d5\u05dd ' + request.studentName + ', \u05d4\u05d5\u05d6\u05e0\u05d4 \u05dc\u05da \u05d4\u05d0\u05e8\u05db\u05d4 \u05e9\u05dc ' + days + ' \u05d9\u05de\u05d9\u05dd \u05dc\u05d4\u05d2\u05e9\u05ea \u05d4\u05ea\u05e8\u05d2\u05d9\u05dc. \u05d1\u05d4\u05e6\u05dc\u05d7\u05d4.';
 
     const replyResult = await chrome.scripting.executeScript({
       target: { tabId: newTab.id },
-      func: async (messageText, pId, currentUrl) => {
+      func: async (studentName, messageText) => {
         try {
-            // Extract numeric post ID from strings like 'p28209'
-            const match = pId.match(/\d+/);
-            if (!match) return { success: false, error: 'Invalid post ID format' };
-            const numericPostId = match[0];
+            const normalizedName = studentName.toLowerCase().trim();
+            const posts = Array.from(document.querySelectorAll('.forumng-post'));
             
-            // Build the ForumNG reply URL
-            const urlObj = new URL(currentUrl);
-            const basePath = urlObj.pathname.split('/mod/')[0];
-            const replyFormUrl = `${urlObj.origin}${basePath}/mod/forumng/editpost.php?replyto=${numericPostId}`;
+            let targetPost = posts.find(p => {
+                const authorEl = p.querySelector('.forumng-author a');
+                return authorEl && authorEl.textContent.trim().toLowerCase().includes(normalizedName);
+            });
             
-            // Fetch the reply page to extract the form and hidden tokens
+            if (!targetPost && posts.length > 0) {
+                targetPost = posts[0];
+            }
+            
+            if (!targetPost) {
+                return { success: false, error: 'No posts found to reply to' };
+            }
+            
+            const replyLinkEl = targetPost.querySelector('.forumng-replylink a');
+            if (!replyLinkEl) {
+                return { success: false, error: 'Reply link not found on post' };
+            }
+            
+            const replyFormUrl = replyLinkEl.href;
+            
             const formResp = await fetch(replyFormUrl);
-            if (!formResp.ok) return { success: false, error: `HTTP ${formResp.status} on reply form` };
+            if (!formResp.ok) {
+                return { success: false, error: 'HTTP ' + formResp.status + ' on fetching reply form' };
+            }
             
             const html = await formResp.text();
             const doc = new DOMParser().parseFromString(html, 'text/html');
             const form = doc.querySelector('form.mform');
             
-            if (!form) return { success: false, error: 'ForumNG reply form not found on page' };
+            if (!form) {
+                return { success: false, error: 'Reply form element not found in HTML' };
+            }
             
             const formData = new URLSearchParams(new FormData(form));
-            
-            // Set the editor text and format fields
-            formData.set('message[text]', `<p>${messageText}</p>`);
+            formData.set('message[text]', '<p>' + messageText + '</p>');
             formData.set('message[format]', '1'); 
             
-            // Moodle requires the specific submit button value to process the form
             const submitBtn = form.querySelector('input[type="submit"][name="submitbutton"]');
             if (submitBtn) {
                 formData.append(submitBtn.name, submitBtn.value);
@@ -844,21 +856,23 @@ async function postForumReply(request, days, sesskey) {
                 formData.append('submitbutton', '1');
             }
 
-            // Submit the form
             const postResp = await fetch(form.action || replyFormUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body: formData.toString()
             });
 
-            if (postResp.ok) return { success: true };
-            return { success: false, error: `Form submission returned HTTP ${postResp.status}` };
+            if (postResp.ok) {
+                return { success: true };
+            }
+            
+            return { success: false, error: 'Submission failed HTTP ' + postResp.status };
 
         } catch (e) {
             return { success: false, error: e.message };
         }
       },
-      args: [replyMessage, request.postId, currentForumUrl]
+      args: [request.studentName, msgStr]
     });
 
     chrome.tabs.remove(newTab.id).catch(() => {});
