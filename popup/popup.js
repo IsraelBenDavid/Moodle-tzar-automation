@@ -147,7 +147,10 @@ async function scanForum() {
       func: extractForumPosts
     });
 
+    console.log('[Tzar popup] executeScript raw results:', results);
     const posts = results[0]?.result;
+    console.log('[Tzar popup] posts received:', posts);
+
     if (!posts || posts.length === 0) {
       showStatus(elements.scanStatus, 'No forum posts found on this page.', 'error');
       setScanLoading(false);
@@ -216,57 +219,149 @@ function updateApiKeyInputForModel(model, storedKeys) {
   elements.apiKeyInput.value = currentKey;
 }
 
-// This function is injected into the Moodle page to extract forum posts
-function extractForumPosts() {
+// This function is injected into the Moodle page to extract forum posts.
+// It is async: when on a discussion-list page it fetches each discussion to get the real message body.
+async function extractForumPosts() {
+  console.log('[Tzar] extractForumPosts started, URL:', location.href);
   const posts = [];
+  const seenKeys = new Set();
 
-  // Strategy 1: Modern Moodle forum post containers
-  const articlePosts = document.querySelectorAll('article.forum-post-container');
-  for (const article of articlePosts) {
-    const authorEl = article.querySelector('.author-info .d-flex a, .postprofile .author a, a.d-inline-block');
-    const contentEl = article.querySelector('.post-content-container .text_to_html, .posting, .text_to_html');
-    if (authorEl && contentEl) {
-      posts.push({
-        author: authorEl.textContent.trim(),
-        content: contentEl.textContent.trim(),
-        postId: article.getAttribute('data-post-id') || article.id || null
-      });
+  try {
+
+  const AUTHOR_SELECTORS = [
+    'a[data-userid]',
+    '.author-info a',
+    '.author-info .d-flex a',
+    '.postprofile .author a',
+    '.forumng-author a',
+    '.forumng-name a',
+    '.author a',
+    '.posting-author a',
+    'a[href*="user/view.php"]',
+    'h4 a',
+    'a.d-inline-block',
+  ];
+
+  const CONTENT_SELECTORS = [
+    '[data-region="post-content"]',
+    '.post-content-container .text_to_html',
+    '.forumng-message',
+    '.forumng-post-content',
+    '.text_to_html',
+    '.posting',
+    '.post-content',
+    '.message',
+    '.post-body',
+  ];
+
+  function tryAddPost(container, authorSelectors, contentSelectors) {
+    let authorEl = null;
+    for (const sel of authorSelectors) {
+      try { authorEl = container.querySelector(sel); } catch (e) { continue; }
+      if (authorEl) break;
     }
+    let contentEl = null;
+    for (const sel of contentSelectors) {
+      try { contentEl = container.querySelector(sel); } catch (e) { continue; }
+      if (contentEl) break;
+    }
+    if (!authorEl || !contentEl) return false;
+    const author = authorEl.textContent.trim();
+    const content = contentEl.textContent.trim();
+    if (!author || !content) return false;
+    const postId = container.getAttribute('data-post-id') || container.id || null;
+    const key = postId || (author + '|' + content).substring(0, 100);
+    if (seenKeys.has(key)) return false;
+    seenKeys.add(key);
+    posts.push({ author, content, postId });
+    return true;
   }
 
-  // Strategy 2: Legacy Moodle forum post divs
+  // Try reading posts directly from the current page (single-discussion view)
+  for (const sel of [
+    'article.forum-post-container', 'article[data-post-id]',
+    '[data-region="post"]',
+    'div.forumpost',
+    '.forumng-post',
+    'li.post', 'li.forumpost', 'li.discussion-post',
+  ]) {
+    document.querySelectorAll(sel).forEach(el => tryAddPost(el, AUTHOR_SELECTORS, CONTENT_SELECTORS));
+  }
   if (posts.length === 0) {
-    const divPosts = document.querySelectorAll('div.forumpost');
-    for (const div of divPosts) {
-      const authorEl = div.querySelector('.author a, .posting-author a');
-      const contentEl = div.querySelector('.posting, .text_to_html, .content .posting');
-      if (authorEl && contentEl) {
-        posts.push({
-          author: authorEl.textContent.trim(),
-          content: contentEl.textContent.trim(),
-          postId: div.id || null
-        });
+    document.querySelectorAll('div[id^="p"], article[id^="p"]').forEach(el => {
+      if (!/^p\d+$/.test(el.id)) return;
+      tryAddPost(el, AUTHOR_SELECTORS, CONTENT_SELECTORS);
+    });
+  }
+
+  // If nothing found on the current page, check for a discussion-list page
+  // where each row is discrow_<id> — fetch each discussion to get the real post body.
+  const discussionRows = document.querySelectorAll('tr[id^="discrow_"]');
+  console.log('[Tzar] discrow rows found:', discussionRows.length, '| direct posts found:', posts.length);
+
+  if (discussionRows.length > 0 && posts.length === 0) {
+    const origin = window.location.origin;
+
+    const fetchPromises = Array.from(discussionRows).map(async row => {
+      const idMatch = row.id.match(/discrow_(\d+)/);
+      if (!idMatch) return null;
+      const discussionId = idMatch[1];
+
+      const authorEl = row.querySelector('a[href*="user/view.php"], td.author a, .author a');
+      const author = authorEl ? authorEl.textContent.trim() : null;
+
+      // Get the discuss URL directly from the topic link in the row — handles
+      // any module path (forumng vs forum) and any URL prefix (e.g. /2025-26/).
+      const topicLinkEl = row.querySelector('a[href*="discuss.php"]');
+      const discussUrl = topicLinkEl ? topicLinkEl.href : null;
+      console.log(`[Tzar] Processing discrow ${discussionId}, author:`, author, '| discussUrl:', discussUrl);
+      if (!author || !discussUrl) return null;
+
+      try {
+        const resp = await fetch(discussUrl);
+        console.log(`[Tzar] fetch discuss.php?d=${discussionId} → status`, resp.status, resp.url);
+        if (!resp.ok) return null;
+        const html = await resp.text();
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+
+        let contentEl = null;
+        for (const sel of CONTENT_SELECTORS) {
+          contentEl = doc.querySelector(sel);
+          if (contentEl) {
+            console.log(`[Tzar] d=${discussionId} matched content selector: "${sel}"`);
+            break;
+          }
+        }
+        if (!contentEl) {
+          console.log(`[Tzar] d=${discussionId} — no content selector matched. Body snippet:`, doc.body?.innerHTML?.substring(0, 300));
+          return null;
+        }
+
+        const content = contentEl.textContent.trim();
+        console.log(`[Tzar] d=${discussionId} content preview:`, content.substring(0, 100));
+        if (!content) return null;
+
+        return { author, content, postId: row.id };
+      } catch (e) {
+        console.error(`[Tzar] fetch error for discrow ${discussionId}:`, e);
+        return null;
       }
+    });
+
+    const results = await Promise.all(fetchPromises);
+    for (const r of results) {
+      if (!r || seenKeys.has(r.postId)) continue;
+      seenKeys.add(r.postId);
+      posts.push(r);
     }
   }
 
-  // Strategy 3: Generic discussion posts
-  if (posts.length === 0) {
-    const genericPosts = document.querySelectorAll('[data-region="post"], .discussion-post');
-    for (const post of genericPosts) {
-      const authorEl = post.querySelector('a[data-userid], .author a, h4 a');
-      const contentEl = post.querySelector('[data-region="post-content"], .post-content, .text_to_html');
-      if (authorEl && contentEl) {
-        posts.push({
-          author: authorEl.textContent.trim(),
-          content: contentEl.textContent.trim(),
-          postId: post.getAttribute('data-post-id') || post.id || null
-        });
-      }
-    }
+    console.log('[Tzar] extractForumPosts final count:', posts.length);
+    return posts;
+  } catch (err) {
+    console.error('[Tzar] UNCAUGHT ERROR in extractForumPosts:', err);
+    return [];
   }
-
-  return posts;
 }
 
 // This function is injected into the Moodle page to get the course URL

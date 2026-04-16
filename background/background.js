@@ -9,17 +9,20 @@ const ANTHROPIC_MODEL = 'claude-sonnet-4-20250514';
 const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
 const OPENAI_MODEL = 'gpt-4o'; // Or gpt-3.5-turbo, gpt-4, etc.
 
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent';
-const GEMINI_MODEL = 'gemini-pro'; // Or gemini-1.5-pro, etc.
+const GEMINI_MODEL = 'gemini-3.1-flash-lite-preview';
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-const SYSTEM_PROMPT = `Analyze the following Moodle forum posts. For each post, identify if the student is asking for an assignment extension. Return a JSON array with objects containing: 'studentName', 'wantsExtension' (boolean), 'requestedDays' (integer, default to 3 if unspecified), and 'assignmentName' (if mentioned).
+const SYSTEM_PROMPT = `Analyze the following Moodle forum posts. Posts may be written in any language, including Hebrew (עברית). For each post, identify if the student is asking for an assignment extension (הארכה, דחייה, עוד זמן, יותר זמן, לדחות, להאריך, more time, delay, extension, etc.).
+
+Return a JSON array with objects containing: 'studentName', 'wantsExtension' (boolean), 'requestedDays' (integer, default to 3 if unspecified), 'assignmentName' (string or null), and 'postId' (string or null).
 
 Rules:
 - Only return valid JSON, no markdown fences, no explanation.
-- If a post is not related to requesting an extension, set wantsExtension to false.
+- Be generous in detecting extension requests: if a student mentions difficulty submitting on time, needing more time, or asking to delay a deadline — set wantsExtension to true.
 - If the number of days is not specified, default to 3.
 - If the assignment name is not mentioned, set assignmentName to null.
-- Parse all posts even if some are not extension requests.`;
+- Parse ALL posts and include every post in the response array, even non-extension posts (set wantsExtension to false for those).
+- Preserve the postId field from each post in the output.`;
 
 // Listen for messages from the popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -48,10 +51,16 @@ async function analyzePosts(posts, modelChoice, apiKey) {
 
   // Format posts for the AI prompt
   const formattedPosts = posts.map((post, i) =>
-    `Post ${i + 1}:\nAuthor: ${post.author}\nContent: ${post.content}`
+    `Post ${i + 1}:\nAuthor: ${post.author}\nPostID: ${post.postId || 'none'}\nContent: ${post.content}`
   ).join('\n\n---\n\n');
 
   const userMessage = `Here are the forum posts to analyze:\n\n${formattedPosts}`;
+
+  console.log('=== SYSTEM PROMPT ===');
+  console.log(SYSTEM_PROMPT);
+  console.log('=== USER MESSAGE ===');
+  console.log(userMessage);
+  console.log('=== END PROMPT ===');
 
   let apiUrl;
   let requestBody;
@@ -158,6 +167,9 @@ async function analyzePosts(posts, modelChoice, apiKey) {
 
     const data = await response.json();
     const rawText = responseParser(data);
+    console.log('=== AI RAW RESPONSE ===');
+    console.log(rawText);
+    console.log('=== END AI RESPONSE ===');
     const requests = JSON.parse(rawText); // Parse the extracted JSON string
 
     if (!Array.isArray(requests)) {

@@ -32,20 +32,70 @@
     }
   });
 
+  const AUTHOR_SELECTORS = [
+    'a[data-userid]',
+    '.author-info a',
+    '.author-info .d-flex a',
+    '.postprofile .author a',
+    '.forumng-author a',
+    '.forumng-name a',
+    '.author a',
+    '.posting-author a',
+    'a[href*="user/view.php"]',
+    'h4 a',
+    'a.d-inline-block',
+  ];
+
+  const CONTENT_SELECTORS = [
+    '[data-region="post-content"]',
+    '.post-content-container .text_to_html',
+    '.forumng-message',
+    '.forumng-post-content',
+    '.text_to_html',
+    '.posting',
+    '.post-content',
+    '.message',
+    '.post-body',
+  ];
+
   // Extract forum posts from the current page
   function extractForumPosts() {
     const posts = [];
+    const seenKeys = new Set();
 
-    // Select all potential post containers on the page
-    const postContainers = document.querySelectorAll(
-      '.forumng-post, .forumpost, article.forum-post-container, [data-region="post"], .discussion-post'
-    );
-    
-    for (const postEl of postContainers) {
+    const POST_CONTAINER_SELECTORS = [
+      'article.forum-post-container',
+      'article[data-post-id]',
+      '[data-region="post"]',
+      'div.forumpost',
+      '.forumng-post',
+      'li.post',
+      'li.forumpost',
+      'li.discussion-post',
+    ];
+
+    for (const containerSel of POST_CONTAINER_SELECTORS) {
+      document.querySelectorAll(containerSel).forEach(postEl => {
         const post = extractPostData(postEl);
-        if (post) {
-            posts.push(post);
-        }
+        if (!post) return;
+        const key = post.postId || (post.author + '|' + post.content).substring(0, 100);
+        if (seenKeys.has(key)) return;
+        seenKeys.add(key);
+        posts.push(post);
+      });
+    }
+
+    // Fallback: elements with numeric post IDs like id="p12345"
+    if (posts.length === 0) {
+      document.querySelectorAll('div[id^="p"], article[id^="p"]').forEach(postEl => {
+        if (!/^p\d+$/.test(postEl.id)) return;
+        const post = extractPostData(postEl);
+        if (!post) return;
+        const key = post.postId || postEl.id;
+        if (seenKeys.has(key)) return;
+        seenKeys.add(key);
+        posts.push(post);
+      });
     }
 
     return posts;
@@ -53,23 +103,27 @@
 
   // A robust extraction function that checks multiple possible CSS selectors
   function extractPostData(postEl) {
-    // Try multiple selectors for the author name (Standard Moodle + ForumNG)
-    const authorEl = postEl.querySelector(
-      '.forumng-author a, .forumng-name a, .author-info a, .author a, .posting-author a, h4 a, a[data-userid], a.d-inline-block'
-    );
-    
-    // Try multiple selectors for the actual text content
-    const contentEl = postEl.querySelector(
-      '.forumng-message, .forumng-post-content, .post-content-container, .posting, .text_to_html, [data-region="post-content"]'
-    );
-
-    if (!authorEl || !contentEl) {
-      return null;
+    let authorEl = null;
+    for (const sel of AUTHOR_SELECTORS) {
+      try { authorEl = postEl.querySelector(sel); } catch (e) { continue; }
+      if (authorEl) break;
     }
 
+    let contentEl = null;
+    for (const sel of CONTENT_SELECTORS) {
+      try { contentEl = postEl.querySelector(sel); } catch (e) { continue; }
+      if (contentEl) break;
+    }
+
+    if (!authorEl || !contentEl) return null;
+
+    const author = authorEl.textContent.trim();
+    const content = contentEl.textContent.trim();
+    if (!author || !content) return null;
+
     return {
-      author: authorEl.textContent.trim(),
-      content: contentEl.textContent.trim(),
+      author,
+      content,
       postId: postEl.getAttribute('data-post-id') || postEl.id || null
     };
   }
