@@ -639,21 +639,30 @@ async function handleApprove(index) {
     await chrome.tabs.update(newTabId, { url: grantUrl.toString() });
     await waitForTabLoad(newTabId);
 
+
     // 6. Fill in the extension date form
     const formResult = await chrome.scripting.executeScript({
       target: { tabId: newTabId },
       func: fillExtensionForm,
-      args: [requestedDays]
+      args: [finalDays] // FIX: Changed from requestedDays to finalDays
     });
 
-    // 7. Close the background tab
+    // 7. Wait for form submission then close the background tab
+    await waitForTabLoad(newTabId);
     chrome.tabs.remove(newTabId);
 
     const result = formResult[0]?.result;
     console.log('[Tzar] form result:', JSON.stringify(result));
 
     if (result && result.success) {
-      actionsContainer.innerHTML = `<span class="status-label approved">Approved for ${finalDays} days</span>`;
+      actionsContainer.innerHTML = '<span class="status-label processing">Posting forum reply...</span>';
+      const replyResult = await postForumReply(request, finalDays, sesskey);
+      if (replyResult.success) {
+        actionsContainer.innerHTML = `<span class="status-label approved">Approved for ${finalDays} days · Reply posted</span>`;
+      } else {
+        console.warn('[Tzar] Forum reply failed:', replyResult.error);
+        actionsContainer.innerHTML = `<span class="status-label approved">Approved for ${finalDays} days · Reply failed: ${escapeHtml(replyResult.error)}</span>`;
+      }
       await updateSavedRequestStatus(index, true, finalDays);
     } else {
       const msg = result?.error || 'Form fill failed.';
@@ -691,71 +700,176 @@ async function updateSavedRequestStatus(index, isApproved, days) {
 }
 
 // Injected into the grant-extension page — fills the date form and submits.
-function fillExtensionForm(requestedDays) {
+function fillExtensionForm(daysToAdd) {
   const log = [];
   try {
     log.push(`URL: ${location.href}`);
 
-    const target = new Date();
-    target.setDate(target.getDate() + requestedDays);
+    // Enable the extension date checkbox first so the selects are active
+    const enableCheckbox = document.getElementById('id_extensionduedate_enabled');
+    if (enableCheckbox && !enableCheckbox.checked) {
+      enableCheckbox.click();
+      log.push('clicked enable checkbox');
+    }
+
+    // Find standard Moodle date selectors by ID
+    const day = document.getElementById('id_extensionduedate_day');
+    const month = document.getElementById('id_extensionduedate_month');
+    const year = document.getElementById('id_extensionduedate_year');
+    const hour = document.getElementById('id_extensionduedate_hour');
+    const min = document.getElementById('id_extensionduedate_minute');
+
+    if (!day || !month || !year) {
+      log.push(`day=${!!day} month=${!!month} year=${!!year} hour=${!!hour} min=${!!min}`);
+      return { success: false, error: 'Date fields not found.', log };
+    }
+
+    // Build base date from the current values already in the form (the assignment's due date)
+    const base = new Date(
+      parseInt(year.value),
+      parseInt(month.value) - 1,
+      parseInt(day.value),
+      hour ? parseInt(hour.value) : 23,
+      min  ? parseInt(min.value)  : 59
+    );
+    log.push(`base date from form: ${base.toISOString()}`);
+
+    const target = new Date(base);
+    target.setDate(target.getDate() + daysToAdd);
     const targetDate = {
       day: target.getDate(),
       month: target.getMonth() + 1,
       year: target.getFullYear(),
-      hour: 23,
-      minute: 59
+      hour: target.getHours(),
+      minute: target.getMinutes()
     };
     log.push(`target date: ${JSON.stringify(targetDate)}`);
 
-    // Enable the extension date if there's a checkbox
-    const enableCheckbox = document.querySelector(
-      'input[name*="extensionduedate[enabled]"], input[id*="extensionduedate_enabled"]'
-    );
-    log.push(`enable checkbox: ${!!enableCheckbox}, checked: ${enableCheckbox?.checked}`);
-    if (enableCheckbox && !enableCheckbox.checked) {
-      enableCheckbox.click();
+    function setSelect(el, value) {
+      if (!el) return false;
+      el.value = String(value);
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
     }
 
-    const day   = document.querySelector('select[name*="extensionduedate[day]"],    select[id*="extensionduedate_day"]');
-    const month = document.querySelector('select[name*="extensionduedate[month]"],  select[id*="extensionduedate_month"]');
-    const year  = document.querySelector('select[name*="extensionduedate[year]"],   select[id*="extensionduedate_year"]');
-    const hour  = document.querySelector('select[name*="extensionduedate[hour]"],   select[id*="extensionduedate_hour"]');
-    const min   = document.querySelector('select[name*="extensionduedate[minute]"], select[id*="extensionduedate_minute"]');
-    log.push(`selects — day:${!!day} month:${!!month} year:${!!year} hour:${!!hour} min:${!!min}`);
+    setSelect(day, targetDate.day);
+    setSelect(month, targetDate.month);
+    setSelect(year, targetDate.year);
+    setSelect(hour, targetDate.hour);
+    setSelect(min, targetDate.minute);
+    log.push('date set via selects');
 
-    if (day && month && year) {
-      day.value   = targetDate.day;   day.dispatchEvent(new Event('change', { bubbles: true }));
-      month.value = targetDate.month; month.dispatchEvent(new Event('change', { bubbles: true }));
-      year.value  = targetDate.year;  year.dispatchEvent(new Event('change', { bubbles: true }));
-      if (hour) { hour.value = targetDate.hour;   hour.dispatchEvent(new Event('change', { bubbles: true })); }
-      if (min)  { min.value  = targetDate.minute; min.dispatchEvent(new Event('change', { bubbles: true })); }
-      log.push('date set via selects');
-    } else {
-      // Fallback: plain date input
-      const dateInput = document.querySelector('input[name*="extensionduedate"], input[type="date"][id*="extension"]');
-      log.push(`fallback date input: ${!!dateInput}`);
-      if (!dateInput) return { success: false, error: 'Date fields not found.', log };
-      const dateStr = `${targetDate.year}-${String(targetDate.month).padStart(2, '0')}-${String(targetDate.day).padStart(2, '0')}`;
-      dateInput.value = dateStr;
-      dateInput.dispatchEvent(new Event('input',  { bubbles: true }));
-      dateInput.dispatchEvent(new Event('change', { bubbles: true }));
+    // Click the specific Moodle save button
+    const saveBtn = document.getElementById('id_submitbutton');
+
+    if (!saveBtn) {
+      return { success: false, error: 'Save button not found.', log };
     }
 
-    const submitButtons = Array.from(document.querySelectorAll('input[type="submit"], button[type="submit"]'));
-    log.push(`submit buttons: ${submitButtons.map(b => (b.value || b.textContent).trim()).join(' | ')}`);
-    const saveBtn = submitButtons.find(b => {
-      const v = (b.value || b.textContent || '').toLowerCase();
-      return v.includes('save') || v.includes('שמור') || v.includes('שמירה');
-    }) || submitButtons[0];
-
-    if (!saveBtn) return { success: false, error: 'Save button not found.', log };
-    log.push(`clicking: ${(saveBtn.value || saveBtn.textContent).trim()}`);
-    saveBtn.click();
-
-    return { success: true, log };
+    log.push('clicking save button');
+    // Return a promise so the caller waits for navigation
+    return new Promise((resolve) => {
+      window.addEventListener('beforeunload', () => resolve({ success: true, log }), { once: true });
+      setTimeout(() => resolve({ success: true, log }), 5000); // fallback
+      saveBtn.click();
+    });
   } catch (err) {
     log.push(`exception: ${err.message}`);
     return { success: false, error: err.message, log };
+  }
+}
+
+async function postForumReply(request, days, sesskey) {
+  try {
+    const postId = request.postId;
+    const origin = new URL(currentForumUrl).origin;
+
+    // Derive discussion ID and URL from postId or currentForumUrl
+    let discussionId = null;
+    let discussUrl = null;
+
+    const discrowMatch = postId && postId.match(/^discrow_(\d+)$/);
+    if (discrowMatch) {
+      discussionId = discrowMatch[1];
+      discussUrl = `${origin}/mod/forum/discuss.php?d=${discussionId}`;
+    } else if (currentForumUrl.includes('discuss.php')) {
+      discussionId = new URL(currentForumUrl).searchParams.get('d');
+      discussUrl = currentForumUrl;
+    }
+
+    if (!discussionId || !discussUrl) {
+      return { success: false, error: 'Cannot determine forum discussion ID' };
+    }
+
+    const newTab = await chrome.tabs.create({ url: discussUrl, active: false });
+    await waitForTabLoad(newTab.id);
+
+    const replyResult = await chrome.scripting.executeScript({
+      target: { tabId: newTab.id },
+      func: async (studentName, daysToAdd, sessk, discId) => {
+        const sesskey = sessk || window.M?.cfg?.sesskey;
+        if (!sesskey) return { success: false, error: 'No sesskey found on page' };
+
+        // Use web service to fetch all posts in this discussion
+        const getResp = await fetch(`/lib/ajax/service.php?sesskey=${sesskey}&info=mod_forum_get_discussion_posts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify([{
+            index: 0,
+            methodname: 'mod_forum_get_discussion_posts',
+            args: { discussionid: parseInt(discId), sortby: 'created', sortdirection: 'ASC' }
+          }])
+        });
+
+        if (!getResp.ok) return { success: false, error: `Fetch posts HTTP ${getResp.status}` };
+        const getData = await getResp.json();
+        if (getData[0]?.error) {
+          return { success: false, error: 'Get posts: ' + (getData[0].error.message || JSON.stringify(getData[0].error)) };
+        }
+
+        const posts = getData[0]?.data?.posts;
+        if (!posts || posts.length === 0) return { success: false, error: 'No posts returned for discussion' };
+
+        // Find the student's post; fall back to the root (first) post
+        const normalizedName = studentName.toLowerCase().trim();
+        let targetPost = posts.find(p =>
+          p.author?.fullname?.toLowerCase().includes(normalizedName)
+        );
+        if (!targetPost) targetPost = posts[0];
+
+        const message = `שלום ${studentName}, הוזנה לך הארכה של ${daysToAdd} ימים להגשת התרגיל. בהצלחה.`;
+
+        const postResp = await fetch(`/lib/ajax/service.php?sesskey=${sesskey}&info=mod_forum_add_discussion_post`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify([{
+            index: 0,
+            methodname: 'mod_forum_add_discussion_post',
+            args: {
+              postid: targetPost.id,
+              subject: 'הארכה',
+              message: message,
+              messageformat: 1,
+              options: []
+            }
+          }])
+        });
+
+        if (!postResp.ok) return { success: false, error: `Post reply HTTP ${postResp.status}` };
+        const postData = await postResp.json();
+        if (postData[0]?.error) {
+          return { success: false, error: postData[0].error.message || JSON.stringify(postData[0].error) };
+        }
+        if (Array.isArray(postData) && postData[0] && !postData[0].error) return { success: true };
+        return { success: false, error: JSON.stringify(postData) };
+      },
+      args: [request.studentName, days, sesskey, discussionId]
+    });
+
+    chrome.tabs.remove(newTab.id).catch(() => {});
+    return replyResult[0]?.result || { success: false, error: 'Script execution failed' };
+  } catch (err) {
+    return { success: false, error: err.message };
   }
 }
 
