@@ -192,6 +192,29 @@ input:focus {
   background: #f1f5f9;
 }
 
+/* Model Selection */
+.model-selection {
+  margin-bottom: 12px;
+}
+
+.model-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.model-options input[type="radio"] {
+  margin-right: 4px;
+}
+
+.model-options label {
+  display: inline-flex;
+  align-items: center;
+  font-weight: normal;
+  cursor: pointer;
+}
+
 /* Badge */
 .badge {
   display: inline-flex;

@@ -20,12 +20,24 @@
         <span class="toggle-icon" id="settings-icon">&#9660;</span>
       </div>
       <div class="section-body" id="settings-body">
-        <label for="api-key-input">Anthropic API Key</label>
+        <div class="model-selection">
+          <label class="section-title">AI Model:</label>
+          <div class="model-options">
+            <input type="radio" id="model-anthropic" name="ai-model" value="anthropic" checked>
+            <label for="model-anthropic">Anthropic Claude</label>
+            <input type="radio" id="model-openai" name="ai-model" value="openai">
+            <label for="model-openai">OpenAI GPT</label>
+            <input type="radio" id="model-gemini" name="ai-model" value="gemini">
+            <label for="model-gemini">Google Gemini</label>
+          </div>
+        </div>
+
+        <label for="api-key-input">API Key:</label>
         <div class="input-group">
           <input type="password" id="api-key-input" placeholder="sk-ant-..." autocomplete="off">
           <button id="toggle-key-visibility" class="icon-btn" title="Toggle visibility">&#128065;</button>
         </div>
-        <button id="save-api-key" class="btn btn-secondary">Save API Key</button>
+        <button id="save-api-key" class="btn btn-primary">Save API Key</button>
         <div id="api-key-status" class="status-msg"></div>
       </div>
     </section>
@@ -52,6 +64,6 @@
     <div id="error-banner" class="error-banner hidden"></div>
   </div>
 
-  <script src="popup.js"></script>
+  <script type="module" src="popup.js"></script>
 </body>
 </html>

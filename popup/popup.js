@@ -2,6 +2,8 @@
 // Moodle Extension Tzar - Popup Script
 // ============================================
 
+import { MOODLE_HOST, DEFAULT_MODEL_CHOICE } from '../utils/constants.js';
+
 document.addEventListener('DOMContentLoaded', init);
 
 // State
@@ -9,6 +11,9 @@ let extensionRequests = [];
 
 // DOM references
 const elements = {};
+
+// Constants for reply message
+const REPLY_MESSAGE_TEMPLATE = "שלום {studentName}, הוזנה לך הארכה של {requestedDays} ימים לתרגיל.";
 
 function init() {
   cacheElements();
@@ -29,6 +34,10 @@ function cacheElements() {
   elements.scanSpinner = document.getElementById('scan-spinner');
   elements.scanStatus = document.getElementById('scan-status');
   elements.resultsSection = document.getElementById('results-section');
+  elements.modelAnthropic = document.getElementById('model-anthropic');
+  elements.modelOpenAI = document.getElementById('model-openai');
+  elements.modelGemini = document.getElementById('model-gemini');
+  elements.modelOptions = document.querySelector('.model-options'); // Parent for radio buttons
   elements.requestsList = document.getElementById('requests-list');
   elements.requestCount = document.getElementById('request-count');
   elements.errorBanner = document.getElementById('error-banner');
@@ -39,6 +48,7 @@ function bindEvents() {
   elements.toggleKeyBtn.addEventListener('click', toggleKeyVisibility);
   elements.settingsToggle.addEventListener('click', toggleSettings);
   elements.scanForumBtn.addEventListener('click', scanForum);
+  elements.modelOptions.addEventListener('change', handleModelChange);
 }
 
 // ---- Settings ----
@@ -53,25 +63,51 @@ function toggleKeyVisibility() {
   input.type = input.type === 'password' ? 'text' : 'password';
 }
 
-async function loadSavedApiKey() {
-  const { apiKey } = await chrome.storage.local.get('apiKey');
-  if (apiKey) {
-    elements.apiKeyInput.value = apiKey;
-    showStatus(elements.apiKeyStatus, 'API key loaded.', 'success');
-    // Collapse settings if key already exists
+async function loadSavedModelAndApiKey(isInit = false) {
+  const { selectedModel = DEFAULT_MODEL_CHOICE, apiKey_anthropic, apiKey_openai, apiKey_gemini } = await chrome.storage.local.get(['selectedModel', 'apiKey_anthropic', 'apiKey_openai', 'apiKey_gemini']);
+
+  // Set the selected model radio button
+  if (elements.modelAnthropic) elements.modelAnthropic.checked = (selectedModel === 'anthropic');
+  if (elements.modelOpenAI) elements.modelOpenAI.checked = (selectedModel === 'openai');
+  if (elements.modelGemini) elements.modelGemini.checked = (selectedModel === 'gemini');
+
+  // Update API key input based on the loaded model
+  updateApiKeyInputForModel(selectedModel, { apiKey_anthropic, apiKey_openai, apiKey_gemini });
+
+  // Collapse settings if a key for the selected model already exists
+  if (isInit && elements.apiKeyInput.value.trim()) {
     elements.settingsBody.classList.add('collapsed');
     elements.settingsIcon.classList.add('collapsed');
   }
 }
 
+async function loadSavedApiKey() {
+  await loadSavedModelAndApiKey(true);
+}
+
+function getSelectedModel() {
+  if (elements.modelAnthropic && elements.modelAnthropic.checked) return 'anthropic';
+  if (elements.modelOpenAI && elements.modelOpenAI.checked) return 'openai';
+  if (elements.modelGemini && elements.modelGemini.checked) return 'gemini';
+  return DEFAULT_MODEL_CHOICE; // Fallback
+}
+
 async function saveApiKey() {
   const key = elements.apiKeyInput.value.trim();
+  const selectedModel = getSelectedModel();
+
   if (!key) {
     showStatus(elements.apiKeyStatus, 'Please enter a valid API key.', 'error');
     return;
   }
-  await chrome.storage.local.set({ apiKey: key });
+
+  // Store API key specific to the selected model
+  const storageKey = `apiKey_${selectedModel}`;
+  await chrome.storage.local.set({ [storageKey]: key, selectedModel: selectedModel });
+
   showStatus(elements.apiKeyStatus, 'API key saved successfully.', 'success');
+
+  await loadSavedModelAndApiKey(false);
 }
 
 // ---- Forum Scanning ----
@@ -80,8 +116,10 @@ async function scanForum() {
   hideError();
 
   // Validate API key is saved
-  const { apiKey } = await chrome.storage.local.get('apiKey');
-  if (!apiKey) {
+  const selectedModel = getSelectedModel();
+  const storageKey = `apiKey_${selectedModel}`;
+  const { [storageKey]: apiKey } = await chrome.storage.local.get(storageKey);
+  if (!apiKey || apiKey.length === 0) {
     showError('Please save your API key in Settings before scanning.');
     return;
   }
@@ -122,7 +160,8 @@ async function scanForum() {
     const response = await chrome.runtime.sendMessage({
       type: 'ANALYZE_POSTS',
       posts: posts,
-      apiKey: apiKey
+      apiKey: apiKey,
+      modelChoice: selectedModel
     });
 
     if (response.error) {
@@ -144,6 +183,37 @@ async function scanForum() {
   } finally {
     setScanLoading(false);
   }
+}
+
+async function handleModelChange(event) {
+  const selectedModel = event.target.value;
+  const { apiKey_anthropic, apiKey_openai, apiKey_gemini } = await chrome.storage.local.get(['apiKey_anthropic', 'apiKey_openai', 'apiKey_gemini']);
+  updateApiKeyInputForModel(selectedModel, { apiKey_anthropic, apiKey_openai, apiKey_gemini });
+  showStatus(elements.apiKeyStatus, '', ''); // Clear status when model changes
+}
+
+function updateApiKeyInputForModel(model, storedKeys) {
+  let placeholderText = '';
+  let currentKey = '';
+
+  switch (model) {
+    case 'anthropic':
+      placeholderText = 'Enter Anthropic API Key (e.g., sk-ant-...)';
+      currentKey = storedKeys.apiKey_anthropic || '';
+      break;
+    case 'openai':
+      placeholderText = 'Enter OpenAI API Key (e.g., sk-...)';
+      currentKey = storedKeys.apiKey_openai || '';
+      break;
+    case 'gemini':
+      placeholderText = 'Enter Google Gemini API Key (e.g., AIza...)';
+      currentKey = storedKeys.apiKey_gemini || '';
+      break;
+    default:
+      placeholderText = 'Enter API Key';
+  }
+  elements.apiKeyInput.placeholder = placeholderText;
+  elements.apiKeyInput.value = currentKey;
 }
 
 // This function is injected into the Moodle page to extract forum posts
@@ -199,6 +269,189 @@ function extractForumPosts() {
   return posts;
 }
 
+// This function is injected into the Moodle page to get the course URL
+function getMoodleCourseUrl() {
+  // Try to find the course link in the breadcrumbs
+  const breadcrumbCourseLink = document.querySelector('.breadcrumb li:nth-child(3) a');
+  if (breadcrumbCourseLink && breadcrumbCourseLink.href) {
+    return breadcrumbCourseLink.href;
+  }
+
+  // Fallback: try to parse from current URL if it's a known Moodle module page
+  const url = window.location.href;
+  const courseIdMatch = url.match(/course\/view\.php\?id=(\d+)/);
+  if (courseIdMatch) {
+    return `${window.location.origin}/course/view.php?id=${courseIdMatch[1]}`;
+  }
+
+  // If not found via breadcrumbs or direct course ID in URL, return null.
+  // More complex heuristics for finding course ID from module pages are prone to breaking.
+  return null;
+}
+
+// This function is injected into a Moodle course page to find an assignment and navigate to its grading page
+async function findAssignmentAndNavigateToGrading(assignmentName) {
+  // Helper: wait for an element to appear in the DOM
+  function waitForElement(selector, timeout = 10000) {
+    return new Promise((resolve, reject) => {
+      const existing = document.querySelector(selector);
+      if (existing) {
+        resolve(existing);
+        return;
+      }
+      const observer = new MutationObserver(() => {
+        const el = document.querySelector(selector);
+        if (el) {
+          observer.disconnect();
+          resolve(el);
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => {
+        observer.disconnect();
+        reject(new Error(`Timeout waiting for element: ${selector}`));
+      }, timeout);
+    });
+  }
+
+  try {
+    // Wait for the page to fully load (e.g., body element to be present)
+    await waitForElement('body', 15000);
+
+    const assignmentLinks = document.querySelectorAll('a[href*="mod/assign/view.php"]');
+    let targetAssignmentLink = null;
+    const normalizedAssignmentName = assignmentName ? assignmentName.toLowerCase().trim() : '';
+
+    for (const link of assignmentLinks) {
+      const linkText = link.textContent.toLowerCase().trim();
+      // Check for exact match or if the link text contains the assignment name
+      if (linkText === normalizedAssignmentName || (normalizedAssignmentName && linkText.includes(normalizedAssignmentName))) {
+        targetAssignmentLink = link;
+        break;
+      }
+    }
+
+    if (!targetAssignmentLink) {
+      return { success: false, error: `Could not find assignment link for "${assignmentName}".` };
+    }
+
+    // Navigate to the grading page for this assignment
+    const gradingUrl = new URL(targetAssignmentLink.href);
+    gradingUrl.searchParams.set('action', 'grading');
+    window.location.href = gradingUrl.toString();
+
+    // Wait for the navigation to complete and the grading table to appear
+    await waitForElement('.gradingtable table, .generaltable', 15000);
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// This function is injected into the Moodle forum page to reply to a student's post
+async function automateForumReply(studentName, requestedDays, postId, replyMessageTemplate) {
+  // Helper: wait for an element to appear in the DOM
+  function waitForElement(selector, timeout = 10000) {
+    return new Promise((resolve, reject) => {
+      const existing = document.querySelector(selector);
+      if (existing) {
+        resolve(existing);
+        return;
+      }
+      const observer = new MutationObserver(() => {
+        const el = document.querySelector(selector);
+        if (el) {
+          observer.disconnect();
+          resolve(el);
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => {
+        observer.disconnect();
+        reject(new Error(`Timeout waiting for element: ${selector}`));
+      }, timeout);
+    });
+  }
+
+  // Helper: wait a set amount of time
+  function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  try {
+    // 1. Find the student's post element using postId
+    const postElement = await waitForElement(`[data-post-id="${postId}"], #${postId}`, 10000);
+    if (!postElement) {
+      return { success: false, error: `Could not find forum post with ID: ${postId}` };
+    }
+
+    // 2. Find and click the "Reply" button/link within that post
+    const replyButton = postElement.querySelector('a[data-action="reply"], .reply-link, .forum-post-reply');
+    if (!replyButton) {
+      return { success: false, error: `Could not find reply button for post ID: ${postId}` };
+    }
+
+    replyButton.click();
+    await delay(1500); // Give time for the reply form/editor to load
+
+    // 3. Wait for the editor to load and insert the message
+    let editorInput = null;
+    try {
+      // Try for Atto editor (textarea with specific class/id)
+      editorInput = await waitForElement('textarea.editor_atto_content, textarea[id*="id_message"]', 3000);
+    } catch (e) {
+      // If Atto not found, try for TinyMCE iframe
+      const iframe = await waitForElement('iframe.cke_wysiwyg_frame, iframe[id*="id_message_ifr"]', 3000).catch(() => null);
+      if (iframe && iframe.contentDocument) {
+        editorInput = iframe.contentDocument.querySelector('body.cke_editable');
+      }
+    }
+
+    if (!editorInput) {
+      return { success: false, error: 'Could not find the forum reply editor.' };
+    }
+
+    // Construct the reply message
+    const replyMessage = replyMessageTemplate
+      .replace('{studentName}', studentName)
+      .replace('{requestedDays}', requestedDays);
+
+    // Set the content based on editor type
+    if (editorInput.tagName === 'TEXTAREA') {
+      editorInput.value = replyMessage;
+      editorInput.dispatchEvent(new Event('input', { bubbles: true }));
+      editorInput.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (editorInput.isContentEditable) { // For TinyMCE body
+      editorInput.innerHTML = `<p>${replyMessage}</p>`;
+      editorInput.dispatchEvent(new Event('input', { bubbles: true }));
+      editorInput.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      return { success: false, error: 'Unsupported editor type.' };
+    }
+
+    await delay(500);
+
+    // 4. Find and click the "Post to forum" or "Submit" button
+    const submitButton = document.querySelector(
+      'input[type="submit"][value*="Post to forum"], ' +
+      'button[type="submit"][name="submitbutton"], ' +
+      'input[type="submit"][value*="שלח לפורום"]' // Hebrew translation for "Post to forum"
+    );
+
+    if (!submitButton) {
+      return { success: false, error: 'Could not find the "Post to forum" button.' };
+    }
+
+    submitButton.click();
+    await delay(2000); // Wait for submission to process
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
 // ---- Render Requests ----
 
 function renderRequests() {
@@ -236,6 +489,8 @@ function renderRequests() {
     card.querySelector('[data-action="approve"]').addEventListener('click', () => handleApprove(index));
     card.querySelector('[data-action="reject"]').addEventListener('click', () => handleReject(index));
 
+    // Store postId in the request object for later use in reply automation
+    request.postId = request.postId || card.dataset.postId; // Assuming postId is available from extractForumPosts
     elements.requestsList.appendChild(card);
   });
 
@@ -329,15 +584,9 @@ function automateGrantExtension(studentName, requestedDays, assignmentName) {
   // Main automation logic
   async function run() {
     try {
-      // Step 1: Look for the grading table or participant list
-      const gradingTable = document.querySelector('.gradingtable table, .generaltable');
-      if (!gradingTable) {
-        // Try to find the assignment link to navigate to the grading page
-        const assignLinks = document.querySelectorAll('a[href*="mod/assign/view.php"]');
-        if (assignLinks.length === 0) {
-          return { success: false, error: 'Could not find grading table or assignment link on this page. Navigate to the assignment grading page first.' };
-        }
-      }
+      // Step 1: Ensure we are on a grading page by waiting for the grading table
+      // This function is injected after navigation to the grading page, so the table should exist.
+      await waitForElement('.gradingtable table, .generaltable', 15000);
 
       // Step 2: Find the student row in the grading table
       const rows = document.querySelectorAll('tr');
