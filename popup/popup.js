@@ -168,16 +168,27 @@ async function scanForum() {
       func: extractForumPosts
     });
 
-    const posts = results[0]?.result?.posts;
-    const forumTitle = results[0]?.result?.forumTitle;
+    const allPosts = results[0]?.result?.posts || [];
+    const forumTitle = results[0]?.result?.forumTitle || null;
 
-    if (!posts || posts.length === 0) {
+    if (allPosts.length === 0) {
       showStatus(elements.scanStatus, 'No forum posts found on this page.', 'error');
       setScanLoading(false);
       return;
     }
 
-    showStatus(elements.scanStatus, `Found ${posts.length} posts. Analyzing with AI...`, 'info');
+    // Posts where the last replier differs from the original author are already answered.
+    // Skip them — no need to send to AI.
+    const answeredCount = allPosts.filter(p => p.isAnswered).length;
+    const posts = allPosts.filter(p => !p.isAnswered);
+
+    if (posts.length === 0) {
+      showStatus(elements.scanStatus, `All ${answeredCount} post(s) already have replies. Nothing to analyze.`, 'info');
+      setScanLoading(false);
+      return;
+    }
+
+    showStatus(elements.scanStatus, `Found ${posts.length} unanswered post(s). Analyzing with AI...`, 'info');
 
     const response = await chrome.runtime.sendMessage({
       type: 'ANALYZE_POSTS',
@@ -194,15 +205,16 @@ async function scanForum() {
     }
 
     extensionRequests = response.requests || [];
-    
-    // Map the discussion URLs and post IDs back to the AI results using author name
+
+    // Map discussion URLs, post IDs, and isAnswered back from the extracted posts.
     extensionRequests.forEach(req => {
         const normalizedReqName = (req.studentName || '').toLowerCase().trim();
         const matchedPost = posts.find(p => p.author && p.author.toLowerCase().includes(normalizedReqName));
-        
+
         if (matchedPost) {
             req.postId = matchedPost.postId;
             req.discussUrl = matchedPost.discussUrl;
+            req.isAnswered = matchedPost.isAnswered || false;
         }
 
         if (!req.assignmentName && forumTitle) {
@@ -216,11 +228,10 @@ async function scanForum() {
     });
 
     renderRequests();
-    const unanswered = extensionRequests.filter(r => r.wantsExtension && !r.isAnswered).length;
-    const answered = extensionRequests.filter(r => r.wantsExtension && r.isAnswered).length;
-    const answeredNote = answered > 0 ? ` (${answered} already answered, hidden)` : '';
+    const openCount = extensionRequests.filter(r => r.wantsExtension && !r.isAnswered).length;
+    const answeredNote = answeredCount > 0 ? ` (${answeredCount} already answered, skipped)` : '';
     showStatus(elements.scanStatus,
-      `Analysis complete. Found ${unanswered} open extension request(s)${answeredNote}.`,
+      `Analysis complete. Found ${openCount} open extension request(s)${answeredNote}.`,
       'success'
     );
   } catch (err) {
@@ -336,16 +347,25 @@ async function extractForumPosts() {
       });
     }
 
+    // Forum listing page: each discrow_ row is a topic.
+    // Compare the original poster vs the last replier directly from the row —
+    // no page fetch needed to decide isAnswered.
     const discussionRows = document.querySelectorAll('tr[id^="discrow_"]');
     if (discussionRows.length > 0 && posts.length === 0) {
       const fetchPromises = Array.from(discussionRows).map(async row => {
-        const idMatch = row.id.match(/discrow_(\d+)/);
-        if (!idMatch) return null;
-
         const topicLinkEl = row.querySelector('a[href*="discuss.php"]');
         const discussUrl = topicLinkEl ? topicLinkEl.href : null;
-
         if (!discussUrl) return null;
+
+        // All user links in the row: first = original poster, last = last replier.
+        const userLinks = Array.from(row.querySelectorAll('a[href*="user/view.php"], a[data-userid]'));
+        if (userLinks.length === 0) return null;
+
+        const originalAuthor = userLinks[0].textContent.trim();
+        const lastReplier = userLinks[userLinks.length - 1].textContent.trim();
+        // If someone other than the original poster was the last to reply, the thread has a reply.
+        const isAnswered = userLinks.length > 1 &&
+          lastReplier.toLowerCase() !== originalAuthor.toLowerCase();
 
         try {
           const resp = await fetch(discussUrl);
@@ -353,89 +373,16 @@ async function extractForumPosts() {
           const html = await resp.text();
           const doc = new DOMParser().parseFromString(html, 'text/html');
 
-          // Collect ALL post containers from the fetched thread page.
-          // Try every known selector and keep the set that yields the most posts.
-          const threadContainerSelectors = [
-            'article.forum-post-container', 'article[data-post-id]',
-            '[data-region="post"]', 'div.forumpost', '.forumng-post',
-            'li.post', 'li.forumpost', 'li.discussion-post',
-          ];
-
-          let threadContainers = [];
-          for (const sel of threadContainerSelectors) {
-            const found = Array.from(doc.querySelectorAll(sel));
-            if (found.length > threadContainers.length) threadContainers = found;
+          let contentEl = null;
+          for (const sel of CONTENT_SELECTORS) {
+            contentEl = doc.querySelector(sel);
+            if (contentEl) break;
           }
+          if (!contentEl) return null;
+          const content = contentEl.textContent.trim();
+          if (!content) return null;
 
-          // Also try the id="p12345" pattern used by some Moodle themes
-          if (threadContainers.length === 0) {
-            const byId = Array.from(doc.querySelectorAll('div[id^="p"], article[id^="p"]'))
-              .filter(el => /^p\d+$/.test(el.id));
-            if (byId.length > 0) threadContainers = byId;
-          }
-
-          // Also try .indent elements (Moodle reply indentation)
-          if (threadContainers.length <= 1) {
-            const indented = Array.from(doc.querySelectorAll('.indent'));
-            if (indented.length > 0) {
-              // Each .indent wraps a reply; prepend the non-indented post if we have containers
-              threadContainers = [...threadContainers, ...indented];
-            }
-          }
-
-          const threadPosts = [];
-          const seenContent = new Set();
-          for (const container of threadContainers) {
-            let postAuthorEl = null;
-            for (const sel of AUTHOR_SELECTORS) {
-              try { postAuthorEl = container.querySelector(sel); } catch(e) { continue; }
-              if (postAuthorEl) break;
-            }
-            let postContentEl = null;
-            for (const sel of CONTENT_SELECTORS) {
-              try { postContentEl = container.querySelector(sel); } catch(e) { continue; }
-              if (postContentEl) break;
-            }
-            const postAuthor = postAuthorEl ? postAuthorEl.textContent.trim() : 'Unknown';
-            const postContent = postContentEl ? postContentEl.textContent.trim() : '';
-            const contentKey = postContent.substring(0, 80);
-            if (postContent && !seenContent.has(contentKey)) {
-              seenContent.add(contentKey);
-              threadPosts.push({ author: postAuthor, content: postContent });
-            }
-          }
-
-          // Last-resort fallback: grab all content elements directly
-          if (threadPosts.length === 0) {
-            for (const sel of CONTENT_SELECTORS) {
-              const all = Array.from(doc.querySelectorAll(sel));
-              if (all.length > 0) {
-                all.forEach(el => {
-                  const txt = el.textContent.trim();
-                  const key = txt.substring(0, 80);
-                  if (txt && !seenContent.has(key)) {
-                    seenContent.add(key);
-                    threadPosts.push({ author: 'Unknown', content: txt });
-                  }
-                });
-                break;
-              }
-            }
-          }
-
-          if (threadPosts.length === 0) return null;
-
-          // Use the first post's author as the thread author (original poster),
-          // NOT the row-level author which Moodle often sets to the last replier.
-          const originalAuthor = threadPosts[0].author;
-          const content = threadPosts[0].content;
-          const thread = threadPosts.map((p, i) =>
-            i === 0
-              ? `[Original Post] ${p.author}: ${p.content}`
-              : `[Reply ${i}] ${p.author}: ${p.content}`
-          ).join('\n\n');
-
-          return { author: originalAuthor, content, postId: row.id, discussUrl, thread };
+          return { author: originalAuthor, content, postId: row.id, discussUrl, isAnswered };
         } catch (e) {
           return null;
         }

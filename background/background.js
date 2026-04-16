@@ -11,9 +11,9 @@ const OPENAI_MODEL = 'gpt-4o';
 const GEMINI_MODEL = 'gemini-3.1-flash-lite-preview';
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-const SYSTEM_PROMPT = `Analyze the following Moodle forum posts. Posts may be written in any language, including Hebrew. For each post, identify if the student is asking for an assignment extension, and whether their request has already been answered.
+const SYSTEM_PROMPT = `Analyze the following Moodle forum posts. Posts may be written in any language, including Hebrew. For each post, identify if the student is asking for an assignment extension.
 
-Return a JSON array with objects containing: 'studentName', 'wantsExtension' (boolean), 'isAnswered' (boolean), 'requestedDays' (integer, default to 3 if unspecified), 'assignmentName' (string or null), 'postId' (string or null), and 'reason' (string or null).
+Return a JSON array with objects containing: 'studentName', 'wantsExtension' (boolean), 'requestedDays' (integer, default to 3 if unspecified), 'assignmentName' (string or null), 'postId' (string or null), and 'reason' (string or null).
 
 Rules:
 - Only return valid JSON, no markdown fences, no explanation.
@@ -22,8 +22,7 @@ Rules:
 - If the assignment name is not mentioned, set assignmentName to null.
 - For the 'reason' field, write a concise one-sentence summary in Hebrew explaining why the student is asking for an extension (e.g. miluim, sickness, workload). If no reason is given, set it to null.
 - Parse ALL posts and include every post in the response array, even non-extension posts (set wantsExtension to false for those).
-- Preserve the postId field from each post in the output.
-- For 'isAnswered': set to true if the thread contains a reply (from a teacher or anyone) that directly addresses the student's extension request — for example, approving it, denying it, asking for documentation, or otherwise resolving it. If the thread has no replies or the replies do not address the extension request, set isAnswered to false. When in doubt, set isAnswered to false.`;
+- Preserve the postId field from each post in the output.`;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'ANALYZE_POSTS') {
@@ -47,15 +46,9 @@ async function analyzePosts(posts, modelChoice, apiKey) {
     return { error: 'AI model choice is missing.' };
   }
 
-  const formattedPosts = posts.map((post, i) => {
-    let text = `Post ${i + 1}:\nAuthor: ${post.author}\nPostID: ${post.postId || 'none'}`;
-    if (post.thread) {
-      text += `\nFull Thread (original post + replies):\n${post.thread}`;
-    } else {
-      text += `\nContent: ${post.content}`;
-    }
-    return text;
-  }).join('\n\n---\n\n');
+  const formattedPosts = posts.map((post, i) =>
+    `Post ${i + 1}:\nAuthor: ${post.author}\nPostID: ${post.postId || 'none'}\nContent: ${post.content}`
+  ).join('\n\n---\n\n');
 
   const userMessage = `Here are the forum posts to analyze:\n\n${formattedPosts}`;
 
@@ -178,7 +171,6 @@ async function analyzePosts(posts, modelChoice, apiKey) {
     const validatedRequests = requests.map(req => ({
       studentName: String(req.studentName || 'Unknown'),
       wantsExtension: Boolean(req.wantsExtension),
-      isAnswered: Boolean(req.isAnswered),
       requestedDays: Number.isInteger(req.requestedDays) ? req.requestedDays : 3,
       assignmentName: req.assignmentName || null,
       postId: req.postId || null,
