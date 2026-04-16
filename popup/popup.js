@@ -800,74 +800,51 @@ async function postForumReply(request, days, sesskey) {
       return { success: false, error: 'Cannot determine forum discussion URL' };
     }
 
+    // Step 1: Open the discussion page
     const newTab = await chrome.tabs.create({ url: discussUrl, active: false });
     await waitForTabLoad(newTab.id);
 
+    // Keep unicode string external to execution scope
     const msgStr = '\u05e9\u05dc\u05d5\u05dd ' + request.studentName + ', \u05d4\u05d5\u05d6\u05e0\u05d4 \u05dc\u05da \u05d4\u05d0\u05e8\u05db\u05d4 \u05e9\u05dc ' + days + ' \u05d9\u05de\u05d9\u05dd \u05dc\u05d4\u05d2\u05e9\u05ea \u05d4\u05ea\u05e8\u05d2\u05d9\u05dc. \u05d1\u05d4\u05e6\u05dc\u05d7\u05d4.';
 
-    const replyResult = await chrome.scripting.executeScript({
+    // Step 2: Find the specific reply link for the student's post with improved matching
+    const submitResult = await chrome.scripting.executeScript({
       target: { tabId: newTab.id },
-      func: async (studentName, messageText) => {
+      func: (studentName, messageText) => {
         try {
             const normalizedName = studentName.toLowerCase().trim();
+            // Split name to parts to handle partial matches or different spacing
+            const searchWords = normalizedName.split(/\s+/).filter(w => w.length > 1);
             const posts = Array.from(document.querySelectorAll('.forumng-post'));
             
-            let targetPost = posts.find(p => {
-                const authorEl = p.querySelector('.forumng-author a');
-                return authorEl && authorEl.textContent.trim().toLowerCase().includes(normalizedName);
-            });
-            
-            if (!targetPost && posts.length > 0) {
-                targetPost = posts[0];
+            let targetPost = null;
+
+            for (const p of posts) {
+                const authorEl = p.querySelector('.forumng-author a, .author a, .posting-author a');
+                if (!authorEl) continue;
+                
+                const authorText = authorEl.textContent.trim().toLowerCase();
+                
+                // Match if all parts of the requested name are found in the post's author name
+                const isMatch = searchWords.every(word => authorText.includes(word));
+                
+                if (isMatch) {
+                    targetPost = p;
+                    break;
+                }
             }
             
+            // Fail gracefully instead of posting to a random student
             if (!targetPost) {
-                return { success: false, error: 'No posts found to reply to' };
+                return { success: false, error: 'Student post not found in this thread. Safety abort.' };
             }
             
             const replyLinkEl = targetPost.querySelector('.forumng-replylink a');
             if (!replyLinkEl) {
-                return { success: false, error: 'Reply link not found on post' };
+                return { success: false, error: 'Reply link not found on the targeted post.' };
             }
             
-            const replyFormUrl = replyLinkEl.href;
-            
-            const formResp = await fetch(replyFormUrl);
-            if (!formResp.ok) {
-                return { success: false, error: 'HTTP ' + formResp.status + ' on fetching reply form' };
-            }
-            
-            const html = await formResp.text();
-            const doc = new DOMParser().parseFromString(html, 'text/html');
-            const form = doc.querySelector('form.mform');
-            
-            if (!form) {
-                return { success: false, error: 'Reply form element not found in HTML' };
-            }
-            
-            const formData = new URLSearchParams(new FormData(form));
-            formData.set('message[text]', '<p>' + messageText + '</p>');
-            formData.set('message[format]', '1'); 
-            
-            const submitBtn = form.querySelector('input[type="submit"][name="submitbutton"]');
-            if (submitBtn) {
-                formData.append(submitBtn.name, submitBtn.value);
-            } else {
-                formData.append('submitbutton', '1');
-            }
-
-            const postResp = await fetch(form.action || replyFormUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: formData.toString()
-            });
-
-            if (postResp.ok) {
-                return { success: true };
-            }
-            
-            return { success: false, error: 'Submission failed HTTP ' + postResp.status };
-
+            return { success: true, replyUrl: replyLinkEl.href };
         } catch (e) {
             return { success: false, error: e.message };
         }
@@ -875,8 +852,66 @@ async function postForumReply(request, days, sesskey) {
       args: [request.studentName, msgStr]
     });
 
+    if (!submitResult[0]?.result?.success) {
+        chrome.tabs.remove(newTab.id).catch(() => {});
+        return { success: false, error: submitResult[0]?.result?.error };
+    }
+
+    // Step 3: Navigate directly to the specific reply form
+    const replyFormUrl = submitResult[0].result.replyUrl;
+    await chrome.tabs.update(newTab.id, { url: replyFormUrl });
+    await waitForTabLoad(newTab.id);
+
+    // Step 4: Fill the form in the DOM and click submit
+    const formResult = await chrome.scripting.executeScript({
+      target: { tabId: newTab.id },
+      func: (messageText) => {
+        try {
+            // Set the underlying hidden textarea
+            const textarea = document.querySelector('textarea[name="message[text]"]') || 
+                             document.querySelector('textarea[id^="id_message"]');
+            if (textarea) textarea.value = messageText;
+
+            // Set content in TinyMCE iframe
+            const tinymceIframe = document.querySelector('iframe.tox-edit-area__iframe');
+            if (tinymceIframe && tinymceIframe.contentDocument) {
+                const body = tinymceIframe.contentDocument.querySelector('body');
+                if (body) body.innerHTML = '<p>' + messageText + '</p>';
+            }
+
+            // Set content in Atto editor (older Moodle default)
+            const attoEditor = document.querySelector('.editor_atto_content');
+            if (attoEditor) {
+                attoEditor.innerHTML = '<p>' + messageText + '</p>';
+            }
+
+            // Find and click the submit button
+            const submitBtn = document.querySelector('input[type="submit"][name="submitbutton"]') ||
+                              document.querySelector('button[type="submit"][name="submitbutton"]') ||
+                              document.querySelector('#id_submitbutton');
+                              
+            if (!submitBtn) return { success: false, error: 'Submit button not found on page.' };
+
+            submitBtn.click();
+            return { success: true };
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
+      },
+      args: [msgStr]
+    });
+
+    if (!formResult[0]?.result?.success) {
+        chrome.tabs.remove(newTab.id).catch(() => {});
+        return { success: false, error: formResult[0]?.result?.error };
+    }
+
+    // Step 5: Wait for the POST request to finish
+    await waitForTabLoad(newTab.id);
     chrome.tabs.remove(newTab.id).catch(() => {});
-    return replyResult[0]?.result || { success: false, error: 'Script execution failed' };
+    
+    return { success: true };
+
   } catch (err) {
     return { success: false, error: err.message };
   }
