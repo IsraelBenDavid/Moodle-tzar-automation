@@ -36,100 +36,49 @@
   function extractForumPosts() {
     const posts = [];
 
-    // Strategy 1: ForumNG plugin posts (most specific for discuss.php)
-    const forumNGPosts = document.querySelectorAll('div.forumng-post');
-    for (const postEl of forumNGPosts) {
-        const post = extractFromForumNGPost(postEl);
-        if (post) posts.push(post);
-    }
-
-    // Strategy 2: Modern Moodle forum post containers (article elements)
-    if (posts.length === 0) {
-      const articlePosts = document.querySelectorAll('article.forum-post-container');
-      for (const article of articlePosts) {
-        const post = extractFromArticle(article);
-        if (post) posts.push(post);
-      }
-    }
-
-    // Strategy 3: Legacy Moodle forum post divs
-    if (posts.length === 0) {
-      const divPosts = document.querySelectorAll('div.forumpost');
-      for (const div of divPosts) {
-        const post = extractFromDiv(div);
-        if (post) posts.push(post);
-      }
-    }
-
-    // Strategy 4: Generic discussion posts with data attributes
-    if (posts.length === 0) {
-      const genericPosts = document.querySelectorAll('[data-region="post"], .discussion-post');
-      for (const el of genericPosts) {
-        const post = extractFromGeneric(el);
-        if (post) posts.push(post);
-      }
+    // Select all potential post containers on the page
+    const postContainers = document.querySelectorAll(
+      '.forumng-post, .forumpost, article.forum-post-container, [data-region="post"], .discussion-post'
+    );
+    
+    for (const postEl of postContainers) {
+        const post = extractPostData(postEl);
+        if (post) {
+            posts.push(post);
+        }
     }
 
     return posts;
   }
 
-  function extractFromForumNGPost(postEl) {
-    const authorEl = postEl.querySelector('.forumng-name a');
-    const contentEl = postEl.querySelector('.forumng-post-content');
+  // A robust extraction function that checks multiple possible CSS selectors
+  function extractPostData(postEl) {
+    // Try multiple selectors for the author name (Standard Moodle + ForumNG)
+    const authorEl = postEl.querySelector(
+      '.forumng-author a, .forumng-name a, .author-info a, .author a, .posting-author a, h4 a, a[data-userid], a.d-inline-block'
+    );
+    
+    // Try multiple selectors for the actual text content
+    const contentEl = postEl.querySelector(
+      '.forumng-message, .forumng-post-content, .post-content-container, .posting, .text_to_html, [data-region="post-content"]'
+    );
+
     if (!authorEl || !contentEl) {
       return null;
     }
-    return {
-      author: authorEl.textContent.trim(),
-      content: contentEl.textContent.trim(),
-      // The post ID is often the element's ID, like "p12345"
-      postId: postEl.id || null
-    };
-  }
 
-  function extractFromArticle(article) {
-    const authorEl = article.querySelector(
-      '.author-info .d-flex a, .postprofile .author a, a.d-inline-block'
-    );
-    const contentEl = article.querySelector(
-      '.post-content-container .text_to_html, .posting, .text_to_html'
-    );
-    if (!authorEl || !contentEl) return null;
     return {
       author: authorEl.textContent.trim(),
       content: contentEl.textContent.trim(),
-      postId: article.getAttribute('data-post-id') || article.id || null
-    };
-  }
-
-  function extractFromDiv(div) {
-    const authorEl = div.querySelector('.author a, .posting-author a');
-    const contentEl = div.querySelector('.posting, .text_to_html, .content .posting');
-    if (!authorEl || !contentEl) return null;
-    return {
-      author: authorEl.textContent.trim(),
-      content: contentEl.textContent.trim(),
-      postId: div.id || null
-    };
-  }
-
-  function extractFromGeneric(el) {
-    const authorEl = el.querySelector('a[data-userid], .author a, h4 a');
-    const contentEl = el.querySelector(
-      '[data-region="post-content"], .post-content, .text_to_html'
-    );
-    if (!authorEl || !contentEl) return null;
-    return {
-      author: authorEl.textContent.trim(),
-      content: contentEl.textContent.trim(),
-      postId: el.getAttribute('data-post-id') || el.id || null
+      postId: postEl.getAttribute('data-post-id') || postEl.id || null
     };
   }
 
   // Detect what type of Moodle page we are on
   function detectPageType() {
     const url = window.location.href;
-    if (url.includes('/mod/forum/')) return 'forum';
+    // Check for both standard forum and forumng
+    if (url.includes('/mod/forum/') || url.includes('/mod/forumng/')) return 'forum';
     if (url.includes('/mod/assign/view.php')) return 'assignment';
     if (url.includes('/grade/')) return 'grading';
     if (url.includes('/course/view.php')) return 'course';
