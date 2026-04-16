@@ -98,7 +98,8 @@ label {
 }
 
 input[type="password"],
-input[type="text"] {
+input[type="text"],
+input[type="number"] {
   width: 100%;
   padding: 8px 12px;
   border: 1px solid #cbd5e1;
@@ -108,10 +109,19 @@ input[type="text"] {
   transition: border-color 0.2s;
 }
 
-input:focus {
+input:focus, select:focus {
   outline: none;
   border-color: #3b82f6;
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+select {
+  padding: 6px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 13px;
+  background: #fff;
+  cursor: pointer;
 }
 
 /* Buttons */
@@ -232,7 +242,7 @@ input:focus {
 
 /* Requests List */
 .requests-list {
-  max-height: 320px;
+  max-height: 380px;
   overflow-y: auto;
 }
 
@@ -261,21 +271,30 @@ input:focus {
   margin-top: 2px;
 }
 
-.request-card .requested-days {
-  display: inline-block;
+.request-card .reason {
+  font-size: 13px;
+  color: #334155;
   margin-top: 6px;
-  padding: 2px 8px;
-  background: #eff6ff;
-  color: #3b82f6;
+  background: #f1f5f9;
+  padding: 6px;
   border-radius: 4px;
-  font-size: 12px;
-  font-weight: 600;
+  border-right: 3px solid #3b82f6; /* RTL style indicator */
+  text-align: right; /* Hebrew is RTL */
+  direction: rtl;
 }
 
-.request-card .actions {
+.request-card .action-controls {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
   margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.request-card .custom-days-input {
+  width: 60px;
+  padding: 5px;
+  height: 28px;
 }
 
 .request-card .status-label {

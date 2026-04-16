@@ -2,36 +2,33 @@
 // Moodle Extension Tzar - Background Service Worker
 // ============================================
 
-// API Endpoints and Models
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_MODEL = 'claude-sonnet-4-20250514';
+const ANTHROPIC_MODEL = 'claude-3-5-sonnet-20241022';
 
 const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
-const OPENAI_MODEL = 'gpt-4o'; // Or gpt-3.5-turbo, gpt-4, etc.
+const OPENAI_MODEL = 'gpt-4o'; 
 
 const GEMINI_MODEL = 'gemini-3.1-flash-lite-preview';
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-const SYSTEM_PROMPT = `Analyze the following Moodle forum posts. Posts may be written in any language, including Hebrew (עברית). For each post, identify if the student is asking for an assignment extension (הארכה, דחייה, עוד זמן, יותר זמן, לדחות, להאריך, more time, delay, extension, etc.).
+const SYSTEM_PROMPT = `Analyze the following Moodle forum posts. Posts may be written in any language, including Hebrew. For each post, identify if the student is asking for an assignment extension.
 
-Return a JSON array with objects containing: 'studentName', 'wantsExtension' (boolean), 'requestedDays' (integer, default to 3 if unspecified), 'assignmentName' (string or null), and 'postId' (string or null).
+Return a JSON array with objects containing: 'studentName', 'wantsExtension' (boolean), 'requestedDays' (integer, default to 3 if unspecified), 'assignmentName' (string or null), 'postId' (string or null), and 'reason' (string or null).
 
 Rules:
 - Only return valid JSON, no markdown fences, no explanation.
 - Be generous in detecting extension requests: if a student mentions difficulty submitting on time, needing more time, or asking to delay a deadline — set wantsExtension to true.
 - If the number of days is not specified, default to 3.
 - If the assignment name is not mentioned, set assignmentName to null.
+- For the 'reason' field, write a concise one-sentence summary in Hebrew explaining why the student is asking for an extension (e.g. miluim, sickness, workload). If no reason is given, set it to null.
 - Parse ALL posts and include every post in the response array, even non-extension posts (set wantsExtension to false for those).
 - Preserve the postId field from each post in the output.`;
 
-// Listen for messages from the popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'ANALYZE_POSTS') {
-    // The message should now include the chosen model and the corresponding API key
     analyzePosts(message.posts, message.modelChoice, message.apiKey)
       .then(result => sendResponse(result))
       .catch(err => sendResponse({ error: err.message }));
-    // Return true to indicate we will send a response asynchronously
     return true;
   }
 });
@@ -49,23 +46,16 @@ async function analyzePosts(posts, modelChoice, apiKey) {
     return { error: 'AI model choice is missing.' };
   }
 
-  // Format posts for the AI prompt
   const formattedPosts = posts.map((post, i) =>
     `Post ${i + 1}:\nAuthor: ${post.author}\nPostID: ${post.postId || 'none'}\nContent: ${post.content}`
   ).join('\n\n---\n\n');
 
   const userMessage = `Here are the forum posts to analyze:\n\n${formattedPosts}`;
 
-  console.log('=== SYSTEM PROMPT ===');
-  console.log(SYSTEM_PROMPT);
-  console.log('=== USER MESSAGE ===');
-  console.log(userMessage);
-  console.log('=== END PROMPT ===');
-
   let apiUrl;
   let requestBody;
   let headers = {};
-  let responseParser; // Function to extract the JSON string from the model's response
+  let responseParser;
 
   switch (modelChoice) {
     case 'anthropic':
@@ -87,9 +77,14 @@ async function analyzePosts(posts, modelChoice, apiKey) {
       responseParser = (data) => {
         const textContent = data.content?.find(block => block.type === 'text');
         if (!textContent) throw new Error('Unexpected Anthropic API response format.');
-        const rawText = textContent.text.trim();
-        // Anthropic might wrap JSON in markdown fences
-        return rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+        
+        let cleanedText = textContent.text.trim();
+        if (cleanedText.startsWith('```json')) cleanedText = cleanedText.slice(7);
+        else if (cleanedText.startsWith('```')) cleanedText = cleanedText.slice(3);
+        
+        if (cleanedText.endsWith('```')) cleanedText = cleanedText.slice(0, -3);
+        
+        return cleanedText.trim();
       };
       break;
 
@@ -106,7 +101,7 @@ async function analyzePosts(posts, modelChoice, apiKey) {
           { role: 'user', content: userMessage }
         ],
         max_tokens: 2048,
-        response_format: { type: "json_object" } // Request JSON output
+        response_format: { type: "json_object" }
       });
       responseParser = (data) => {
         const content = data.choices[0]?.message?.content;
@@ -116,7 +111,6 @@ async function analyzePosts(posts, modelChoice, apiKey) {
       break;
 
     case 'gemini':
-      // Gemini API key is often passed as a query parameter for simple cases
       apiUrl = `${GEMINI_API_URL}?key=${apiKey}`;
       headers = {
         'Content-Type': 'application/json'
@@ -132,7 +126,7 @@ async function analyzePosts(posts, modelChoice, apiKey) {
           }
         ],
         generationConfig: {
-          responseMimeType: "application/json", // Request JSON output
+          responseMimeType: "application/json",
           maxOutputTokens: 2048
         }
       });
@@ -156,40 +150,32 @@ async function analyzePosts(posts, modelChoice, apiKey) {
 
     if (!response.ok) {
       const errBody = await response.text();
-      if (response.status === 401) {
-        return { error: `Invalid API key for ${modelChoice}. Please check your API key in Settings.` };
-      }
-      if (response.status === 429) {
-        return { error: `API rate limit exceeded for ${modelChoice}. Please wait and try again.` };
-      }
       return { error: `API request failed for ${modelChoice} (${response.status}): ${errBody}` };
     }
 
     const data = await response.json();
     const rawText = responseParser(data);
-    console.log('=== AI RAW RESPONSE ===');
-    console.log(rawText);
-    console.log('=== END AI RESPONSE ===');
-    const requests = JSON.parse(rawText); // Parse the extracted JSON string
+    let requests = JSON.parse(rawText);
 
     if (!Array.isArray(requests)) {
-      return { error: 'AI response was not a valid JSON array.' };
+      if (requests.requests && Array.isArray(requests.requests)) {
+        requests = requests.requests;
+      } else {
+         return { error: 'AI response was not a valid JSON array.' };
+      }
     }
 
-    // Validate and normalize each request object
     const validatedRequests = requests.map(req => ({
       studentName: String(req.studentName || 'Unknown'),
       wantsExtension: Boolean(req.wantsExtension),
       requestedDays: Number.isInteger(req.requestedDays) ? req.requestedDays : 3,
       assignmentName: req.assignmentName || null,
-      postId: req.postId || null // Include postId from the original post if available
+      postId: req.postId || null,
+      reason: req.reason || null
     }));
 
     return { requests: validatedRequests };
   } catch (err) {
-    if (err instanceof SyntaxError) {
-      return { error: 'Failed to parse AI response as JSON. Please try scanning again.' };
-    }
     return { error: `Analysis failed: ${err.message}` };
   }
 }
