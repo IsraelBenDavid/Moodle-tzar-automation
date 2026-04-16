@@ -36,14 +36,23 @@
   function extractForumPosts() {
     const posts = [];
 
-    // Strategy 1: Modern Moodle forum post containers (article elements)
-    const articlePosts = document.querySelectorAll('article.forum-post-container');
-    for (const article of articlePosts) {
-      const post = extractFromArticle(article);
-      if (post) posts.push(post);
+    // Strategy 1: ForumNG plugin posts (most specific for discuss.php)
+    const forumNGPosts = document.querySelectorAll('div.forumng-post');
+    for (const postEl of forumNGPosts) {
+        const post = extractFromForumNGPost(postEl);
+        if (post) posts.push(post);
     }
 
-    // Strategy 2: Legacy Moodle forum post divs
+    // Strategy 2: Modern Moodle forum post containers (article elements)
+    if (posts.length === 0) {
+      const articlePosts = document.querySelectorAll('article.forum-post-container');
+      for (const article of articlePosts) {
+        const post = extractFromArticle(article);
+        if (post) posts.push(post);
+      }
+    }
+
+    // Strategy 3: Legacy Moodle forum post divs
     if (posts.length === 0) {
       const divPosts = document.querySelectorAll('div.forumpost');
       for (const div of divPosts) {
@@ -52,7 +61,7 @@
       }
     }
 
-    // Strategy 3: Generic discussion posts with data attributes
+    // Strategy 4: Generic discussion posts with data attributes
     if (posts.length === 0) {
       const genericPosts = document.querySelectorAll('[data-region="post"], .discussion-post');
       for (const el of genericPosts) {
@@ -62,6 +71,20 @@
     }
 
     return posts;
+  }
+
+  function extractFromForumNGPost(postEl) {
+    const authorEl = postEl.querySelector('.forumng-name a');
+    const contentEl = postEl.querySelector('.forumng-post-content');
+    if (!authorEl || !contentEl) {
+      return null;
+    }
+    return {
+      author: authorEl.textContent.trim(),
+      content: contentEl.textContent.trim(),
+      // The post ID is often the element's ID, like "p12345"
+      postId: postEl.id || null
+    };
   }
 
   function extractFromArticle(article) {
