@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Moodle Extension Tzar</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Moodle Extension Tzar</h1>
+      <p class="subtitle">Assignment Extension Automation</p>
+    </header>
+
+    <!-- Settings Section -->
+    <section id="settings-section" class="section">
+      <div class="section-header" id="settings-toggle">
+        <span class="section-title">Settings</span>
+        <span class="toggle-icon" id="settings-icon">&#9660;</span>
+      </div>
+      <div class="section-body" id="settings-body">
+        <label for="api-key-input">Anthropic API Key</label>
+        <div class="input-group">
+          <input type="password" id="api-key-input" placeholder="sk-ant-..." autocomplete="off">
+          <button id="toggle-key-visibility" class="icon-btn" title="Toggle visibility">&#128065;</button>
+        </div>
+        <button id="save-api-key" class="btn btn-secondary">Save API Key</button>
+        <div id="api-key-status" class="status-msg"></div>
+      </div>
+    </section>
+
+    <!-- Scan Section -->
+    <section id="scan-section" class="section">
+      <button id="scan-forum-btn" class="btn btn-primary btn-full">
+        <span id="scan-btn-text">Scan Forum</span>
+        <span id="scan-spinner" class="spinner hidden"></span>
+      </button>
+      <div id="scan-status" class="status-msg"></div>
+    </section>
+
+    <!-- Results Section -->
+    <section id="results-section" class="section hidden">
+      <div class="section-header">
+        <span class="section-title">Extension Requests</span>
+        <span id="request-count" class="badge">0</span>
+      </div>
+      <div id="requests-list" class="requests-list"></div>
+    </section>
+
+    <!-- Error Display -->
+    <div id="error-banner" class="error-banner hidden"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
