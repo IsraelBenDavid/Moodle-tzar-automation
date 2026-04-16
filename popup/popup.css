@@ -1,0 +1,344 @@
+/* ============================================
+   Moodle Extension Tzar - Popup Styles
+   ============================================ */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  width: 400px;
+  min-height: 300px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+  font-size: 14px;
+  color: #1a1a2e;
+  background: #f8f9fa;
+}
+
+.container {
+  padding: 16px;
+}
+
+/* Header */
+header {
+  text-align: center;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 2px solid #e2e8f0;
+}
+
+header h1 {
+  font-size: 18px;
+  font-weight: 700;
+  color: #1a1a2e;
+}
+
+header .subtitle {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+/* Sections */
+.section {
+  margin-bottom: 12px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  padding: 8px 0;
+}
+
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.toggle-icon {
+  font-size: 10px;
+  color: #94a3b8;
+  transition: transform 0.2s;
+}
+
+.toggle-icon.collapsed {
+  transform: rotate(-90deg);
+}
+
+.section-body {
+  padding: 8px 0;
+}
+
+.section-body.collapsed {
+  display: none;
+}
+
+/* Form Elements */
+label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+  margin-bottom: 4px;
+}
+
+.input-group {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.input-group input {
+  flex: 1;
+}
+
+input[type="password"],
+input[type="text"] {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 13px;
+  background: #fff;
+  transition: border-color 0.2s;
+}
+
+input:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.btn-secondary {
+  background: #e2e8f0;
+  color: #334155;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: #cbd5e1;
+}
+
+.btn-approve {
+  background: #10b981;
+  color: #fff;
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+.btn-approve:hover:not(:disabled) {
+  background: #059669;
+}
+
+.btn-reject {
+  background: #ef4444;
+  color: #fff;
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+.btn-reject:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+.btn-full {
+  width: 100%;
+}
+
+.icon-btn {
+  padding: 6px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.icon-btn:hover {
+  background: #f1f5f9;
+}
+
+/* Badge */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 11px;
+  background: #3b82f6;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* Requests List */
+.requests-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.request-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 8px;
+  transition: box-shadow 0.15s;
+}
+
+.request-card:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.request-card .student-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: #1e293b;
+}
+
+.request-card .assignment-name {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+.request-card .requested-days {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  background: #eff6ff;
+  color: #3b82f6;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.request-card .actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.request-card .status-label {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.status-label.approved {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.status-label.rejected {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.status-label.processing {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* Status Messages */
+.status-msg {
+  font-size: 12px;
+  margin-top: 6px;
+  min-height: 16px;
+}
+
+.status-msg.success {
+  color: #10b981;
+}
+
+.status-msg.error {
+  color: #ef4444;
+}
+
+.status-msg.info {
+  color: #3b82f6;
+}
+
+/* Error Banner */
+.error-banner {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: #dc2626;
+  font-size: 12px;
+  margin-top: 12px;
+}
+
+/* Spinner */
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Utilities */
+.hidden {
+  display: none !important;
+}
+
+/* Scrollbar */
+.requests-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.requests-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.requests-list::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
