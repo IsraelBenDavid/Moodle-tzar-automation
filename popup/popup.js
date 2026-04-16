@@ -784,14 +784,13 @@ async function postForumReply(request, days, sesskey) {
     const postId = request.postId;
     const origin = new URL(currentForumUrl).origin;
 
-    // Derive discussion ID and URL from postId or currentForumUrl
     let discussionId = null;
     let discussUrl = null;
 
     const discrowMatch = postId && postId.match(/^discrow_(\d+)$/);
     if (discrowMatch) {
       discussionId = discrowMatch[1];
-      discussUrl = `${origin}/mod/forum/discuss.php?d=${discussionId}`;
+      discussUrl = `${origin}/mod/forumng/discuss.php?d=${discussionId}`;
     } else if (currentForumUrl.includes('discuss.php')) {
       discussionId = new URL(currentForumUrl).searchParams.get('d');
       discussUrl = currentForumUrl;
@@ -804,66 +803,62 @@ async function postForumReply(request, days, sesskey) {
     const newTab = await chrome.tabs.create({ url: discussUrl, active: false });
     await waitForTabLoad(newTab.id);
 
+    // Pass the message externally to keep the injected code block strictly English
+    const replyMessage = "\u05e9\u05dc\u05d5\u05dd " + request.studentName + ", \u05d4\u05d5\u05d6\u05e0\u05d4 \u05dc\u05da \u05d4\u05d0\u05e8\u05db\u05d4 \u05e9\u05dc " + days + " \u05d9\u05de\u05d9\u05dd \u05dc\u05d4\u05d2\u05e9\u05ea \u05d4\u05ea\u05e8\u05d2\u05d9\u05dc. \u05d1\u05d4\u05e6\u05dc\u05d7\u05d4.";
+
     const replyResult = await chrome.scripting.executeScript({
       target: { tabId: newTab.id },
-      func: async (studentName, daysToAdd, sessk, discId) => {
-        const sesskey = sessk || window.M?.cfg?.sesskey;
-        if (!sesskey) return { success: false, error: 'No sesskey found on page' };
-
-        // Use web service to fetch all posts in this discussion
-        const getResp = await fetch(`/lib/ajax/service.php?sesskey=${sesskey}&info=mod_forum_get_discussion_posts`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify([{
-            index: 0,
-            methodname: 'mod_forum_get_discussion_posts',
-            args: { discussionid: parseInt(discId), sortby: 'created', sortdirection: 'ASC' }
-          }])
-        });
-
-        if (!getResp.ok) return { success: false, error: `Fetch posts HTTP ${getResp.status}` };
-        const getData = await getResp.json();
-        if (getData[0]?.error) {
-          return { success: false, error: 'Get posts: ' + (getData[0].error.message || JSON.stringify(getData[0].error)) };
-        }
-
-        const posts = getData[0]?.data?.posts;
-        if (!posts || posts.length === 0) return { success: false, error: 'No posts returned for discussion' };
-
-        // Find the student's post; fall back to the root (first) post
-        const normalizedName = studentName.toLowerCase().trim();
-        let targetPost = posts.find(p =>
-          p.author?.fullname?.toLowerCase().includes(normalizedName)
-        );
-        if (!targetPost) targetPost = posts[0];
-
-        const message = `שלום ${studentName}, הוזנה לך הארכה של ${daysToAdd} ימים להגשת התרגיל. בהצלחה.`;
-
-        const postResp = await fetch(`/lib/ajax/service.php?sesskey=${sesskey}&info=mod_forum_add_discussion_post`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify([{
-            index: 0,
-            methodname: 'mod_forum_add_discussion_post',
-            args: {
-              postid: targetPost.id,
-              subject: 'הארכה',
-              message: message,
-              messageformat: 1,
-              options: []
+      func: async (messageText, pId, currentUrl) => {
+        try {
+            // Extract numeric post ID from strings like 'p28209'
+            const match = pId.match(/\d+/);
+            if (!match) return { success: false, error: 'Invalid post ID format' };
+            const numericPostId = match[0];
+            
+            // Build the ForumNG reply URL
+            const urlObj = new URL(currentUrl);
+            const basePath = urlObj.pathname.split('/mod/')[0];
+            const replyFormUrl = `${urlObj.origin}${basePath}/mod/forumng/editpost.php?replyto=${numericPostId}`;
+            
+            // Fetch the reply page to extract the form and hidden tokens
+            const formResp = await fetch(replyFormUrl);
+            if (!formResp.ok) return { success: false, error: `HTTP ${formResp.status} on reply form` };
+            
+            const html = await formResp.text();
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const form = doc.querySelector('form.mform');
+            
+            if (!form) return { success: false, error: 'ForumNG reply form not found on page' };
+            
+            const formData = new URLSearchParams(new FormData(form));
+            
+            // Set the editor text and format fields
+            formData.set('message[text]', `<p>${messageText}</p>`);
+            formData.set('message[format]', '1'); 
+            
+            // Moodle requires the specific submit button value to process the form
+            const submitBtn = form.querySelector('input[type="submit"][name="submitbutton"]');
+            if (submitBtn) {
+                formData.append(submitBtn.name, submitBtn.value);
+            } else {
+                formData.append('submitbutton', '1');
             }
-          }])
-        });
 
-        if (!postResp.ok) return { success: false, error: `Post reply HTTP ${postResp.status}` };
-        const postData = await postResp.json();
-        if (postData[0]?.error) {
-          return { success: false, error: postData[0].error.message || JSON.stringify(postData[0].error) };
+            // Submit the form
+            const postResp = await fetch(form.action || replyFormUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: formData.toString()
+            });
+
+            if (postResp.ok) return { success: true };
+            return { success: false, error: `Form submission returned HTTP ${postResp.status}` };
+
+        } catch (e) {
+            return { success: false, error: e.message };
         }
-        if (Array.isArray(postData) && postData[0] && !postData[0].error) return { success: true };
-        return { success: false, error: JSON.stringify(postData) };
       },
-      args: [request.studentName, days, sesskey, discussionId]
+      args: [replyMessage, request.postId, currentForumUrl]
     });
 
     chrome.tabs.remove(newTab.id).catch(() => {});
