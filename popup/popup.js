@@ -169,7 +169,7 @@ async function scanForum() {
     });
 
     const posts = results[0]?.result?.posts;
-    const forumTitle = results[0]?.result?.forumTitle; // Try to grab the forum title to help with assignment matching
+    const forumTitle = results[0]?.result?.forumTitle;
 
     if (!posts || posts.length === 0) {
       showStatus(elements.scanStatus, 'No forum posts found on this page.', 'error');
@@ -195,22 +195,32 @@ async function scanForum() {
 
     extensionRequests = response.requests || [];
     
-    // Inject the forum title into requests if AI didn't find an assignment name
+    // Map the discussion URLs and post IDs back to the AI results using author name
     extensionRequests.forEach(req => {
+        const normalizedReqName = (req.studentName || '').toLowerCase().trim();
+        const matchedPost = posts.find(p => p.author && p.author.toLowerCase().includes(normalizedReqName));
+        
+        if (matchedPost) {
+            req.postId = matchedPost.postId;
+            req.discussUrl = matchedPost.discussUrl;
+        }
+
         if (!req.assignmentName && forumTitle) {
             req.assignmentName = extractNumberOrNameFromTitle(forumTitle);
         }
     });
 
-    // Save results to storage
     await chrome.storage.local.set({
         savedRequests: extensionRequests,
         savedForumUrl: currentForumUrl
     });
 
     renderRequests();
+    const unanswered = extensionRequests.filter(r => r.wantsExtension && !r.isAnswered).length;
+    const answered = extensionRequests.filter(r => r.wantsExtension && r.isAnswered).length;
+    const answeredNote = answered > 0 ? ` (${answered} already answered, hidden)` : '';
     showStatus(elements.scanStatus,
-      `Analysis complete. Found ${extensionRequests.length} extension request(s).`,
+      `Analysis complete. Found ${unanswered} open extension request(s)${answeredNote}.`,
       'success'
     );
   } catch (err) {
@@ -266,7 +276,6 @@ async function extractForumPosts() {
   const posts = [];
   const seenKeys = new Set();
   
-  // Try to get the forum title to help figure out which assignment we are in
   let forumTitle = document.title;
   const h2Title = document.querySelector('h2');
   if(h2Title) forumTitle = h2Title.textContent;
@@ -297,18 +306,21 @@ async function extractForumPosts() {
         if (contentEl) break;
       }
       if (!authorEl || !contentEl) return false;
+      
       const author = authorEl.textContent.trim();
       const content = contentEl.textContent.trim();
       if (!author || !content) return false;
+      
       const postId = container.getAttribute('data-post-id') || container.id || null;
       const key = postId || (author + '|' + content).substring(0, 100);
+      
       if (seenKeys.has(key)) return false;
       seenKeys.add(key);
-      posts.push({ author, content, postId });
+      
+      posts.push({ author, content, postId, discussUrl: window.location.href });
       return true;
     }
 
-    // Single page mode
     for (const sel of [
       'article.forum-post-container', 'article[data-post-id]',
       '[data-region="post"]', 'div.forumpost', '.forumng-post',
@@ -316,6 +328,7 @@ async function extractForumPosts() {
     ]) {
       document.querySelectorAll(sel).forEach(el => tryAddPost(el, AUTHOR_SELECTORS, CONTENT_SELECTORS));
     }
+    
     if (posts.length === 0) {
       document.querySelectorAll('div[id^="p"], article[id^="p"]').forEach(el => {
         if (!/^p\d+$/.test(el.id)) return;
@@ -323,18 +336,16 @@ async function extractForumPosts() {
       });
     }
 
-    // Discussion list mode
     const discussionRows = document.querySelectorAll('tr[id^="discrow_"]');
     if (discussionRows.length > 0 && posts.length === 0) {
       const fetchPromises = Array.from(discussionRows).map(async row => {
         const idMatch = row.id.match(/discrow_(\d+)/);
         if (!idMatch) return null;
-        const discussionId = idMatch[1];
-        const authorEl = row.querySelector('a[href*="user/view.php"], td.author a, .author a');
-        const author = authorEl ? authorEl.textContent.trim() : null;
+
         const topicLinkEl = row.querySelector('a[href*="discuss.php"]');
         const discussUrl = topicLinkEl ? topicLinkEl.href : null;
-        if (!author || !discussUrl) return null;
+
+        if (!discussUrl) return null;
 
         try {
           const resp = await fetch(discussUrl);
@@ -342,17 +353,89 @@ async function extractForumPosts() {
           const html = await resp.text();
           const doc = new DOMParser().parseFromString(html, 'text/html');
 
-          let contentEl = null;
-          for (const sel of CONTENT_SELECTORS) {
-            contentEl = doc.querySelector(sel);
-            if (contentEl) break;
+          // Collect ALL post containers from the fetched thread page.
+          // Try every known selector and keep the set that yields the most posts.
+          const threadContainerSelectors = [
+            'article.forum-post-container', 'article[data-post-id]',
+            '[data-region="post"]', 'div.forumpost', '.forumng-post',
+            'li.post', 'li.forumpost', 'li.discussion-post',
+          ];
+
+          let threadContainers = [];
+          for (const sel of threadContainerSelectors) {
+            const found = Array.from(doc.querySelectorAll(sel));
+            if (found.length > threadContainers.length) threadContainers = found;
           }
-          if (!contentEl) return null;
 
-          const content = contentEl.textContent.trim();
-          if (!content) return null;
+          // Also try the id="p12345" pattern used by some Moodle themes
+          if (threadContainers.length === 0) {
+            const byId = Array.from(doc.querySelectorAll('div[id^="p"], article[id^="p"]'))
+              .filter(el => /^p\d+$/.test(el.id));
+            if (byId.length > 0) threadContainers = byId;
+          }
 
-          return { author, content, postId: row.id };
+          // Also try .indent elements (Moodle reply indentation)
+          if (threadContainers.length <= 1) {
+            const indented = Array.from(doc.querySelectorAll('.indent'));
+            if (indented.length > 0) {
+              // Each .indent wraps a reply; prepend the non-indented post if we have containers
+              threadContainers = [...threadContainers, ...indented];
+            }
+          }
+
+          const threadPosts = [];
+          const seenContent = new Set();
+          for (const container of threadContainers) {
+            let postAuthorEl = null;
+            for (const sel of AUTHOR_SELECTORS) {
+              try { postAuthorEl = container.querySelector(sel); } catch(e) { continue; }
+              if (postAuthorEl) break;
+            }
+            let postContentEl = null;
+            for (const sel of CONTENT_SELECTORS) {
+              try { postContentEl = container.querySelector(sel); } catch(e) { continue; }
+              if (postContentEl) break;
+            }
+            const postAuthor = postAuthorEl ? postAuthorEl.textContent.trim() : 'Unknown';
+            const postContent = postContentEl ? postContentEl.textContent.trim() : '';
+            const contentKey = postContent.substring(0, 80);
+            if (postContent && !seenContent.has(contentKey)) {
+              seenContent.add(contentKey);
+              threadPosts.push({ author: postAuthor, content: postContent });
+            }
+          }
+
+          // Last-resort fallback: grab all content elements directly
+          if (threadPosts.length === 0) {
+            for (const sel of CONTENT_SELECTORS) {
+              const all = Array.from(doc.querySelectorAll(sel));
+              if (all.length > 0) {
+                all.forEach(el => {
+                  const txt = el.textContent.trim();
+                  const key = txt.substring(0, 80);
+                  if (txt && !seenContent.has(key)) {
+                    seenContent.add(key);
+                    threadPosts.push({ author: 'Unknown', content: txt });
+                  }
+                });
+                break;
+              }
+            }
+          }
+
+          if (threadPosts.length === 0) return null;
+
+          // Use the first post's author as the thread author (original poster),
+          // NOT the row-level author which Moodle often sets to the last replier.
+          const originalAuthor = threadPosts[0].author;
+          const content = threadPosts[0].content;
+          const thread = threadPosts.map((p, i) =>
+            i === 0
+              ? `[Original Post] ${p.author}: ${p.content}`
+              : `[Reply ${i}] ${p.author}: ${p.content}`
+          ).join('\n\n');
+
+          return { author: originalAuthor, content, postId: row.id, discussUrl, thread };
         } catch (e) {
           return null;
         }
@@ -376,9 +459,11 @@ async function extractForumPosts() {
 
 function renderRequests() {
   elements.requestsList.innerHTML = '';
-  elements.requestCount.textContent = extensionRequests.length;
 
-  if (extensionRequests.length === 0) {
+  const unansweredRequests = extensionRequests.filter(r => r.wantsExtension && !r.isAnswered);
+  elements.requestCount.textContent = unansweredRequests.length;
+
+  if (unansweredRequests.length === 0) {
     elements.resultsSection.classList.add('hidden');
     return;
   }
@@ -386,7 +471,7 @@ function renderRequests() {
   elements.resultsSection.classList.remove('hidden');
 
   extensionRequests.forEach((request, index) => {
-    if (!request.wantsExtension) return;
+    if (!request.wantsExtension || request.isAnswered) return;
 
     const initialDays = request.requestedDays || 3;
     const card = document.createElement('div');
@@ -436,9 +521,6 @@ function renderRequests() {
     request.postId = request.postId || card.dataset.postId;
     elements.requestsList.appendChild(card);
   });
-
-  const extensionCount = extensionRequests.filter(r => r.wantsExtension).length;
-  elements.requestCount.textContent = extensionCount;
 }
 
 // ---- Wait For Background Tab Load ----
@@ -456,6 +538,7 @@ function waitForTabLoad(tabId) {
 
 // ---- Actions ----
 
+// --- Updated handleApprove with Rollback logic ---
 async function handleApprove(index) {
   const request = extensionRequests[index];
   const card = elements.requestsList.querySelector(`[data-index="${index}"]`);
@@ -464,119 +547,61 @@ async function handleApprove(index) {
   
   const daysSelect = card.querySelector('.days-select');
   const customInput = card.querySelector('.custom-days-input');
-  let finalDays = 3;
-  
-  if (daysSelect.value === 'custom') {
-    finalDays = parseInt(customInput.value, 10) || 3;
-  } else {
-    finalDays = parseInt(daysSelect.value, 10);
-  }
+  let finalDays = (daysSelect.value === 'custom') ? (parseInt(customInput.value, 10) || 3) : parseInt(daysSelect.value, 10);
 
   request.requestedDays = finalDays;
-
   actionControls.classList.add('hidden');
-  actionsContainer.innerHTML = '<span class="status-label processing">Navigating to grading page...</span>';
+  actionsContainer.innerHTML = '<span class="status-label processing">Applying extension...</span>';
 
   let newTabId = null;
+  let grantUrl = null;
 
   try {
     const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-    // 1. Get Course URL and the forum's module ID from the current page
+    // 1. Get Course URL and Module ID
     const courseUrlRes = await chrome.scripting.executeScript({
       target: { tabId: currentTab.id },
       func: () => {
         const navLinks = Array.from(document.querySelectorAll('.breadcrumb a, nav[aria-label="Breadcrumb"] a, nav[aria-label="נתיב"] a, .breadcrumb-nav a'));
         const courseLink = navLinks.find(a => a.href.includes('course/view.php'));
-        // Also capture the forum's own module ID so we can locate its section on the course page
         const moduleId = new URLSearchParams(window.location.search).get('id');
         return { courseUrl: courseLink ? courseLink.href : null, moduleId };
       }
     });
 
     const { courseUrl, moduleId: forumModuleId } = courseUrlRes[0]?.result || {};
-    if (!courseUrl) throw new Error("Could not find course URL. Please ensure you are on a page linked to the course.");
+    if (!courseUrl) throw new Error("Could not find course URL.");
 
-    // 2. Open new tab in background
     const newTab = await chrome.tabs.create({ url: courseUrl, active: false });
     newTabId = newTab.id;
     await waitForTabLoad(newTabId);
 
-    actionsContainer.innerHTML = '<span class="status-label processing">Locating assignment...</span>';
-
-    // 3. Find Assignment URL — first try section-aware matching using the forum's module ID,
-    //    then fall back to text matching across the whole course page.
+    // 2. Find Assignment URL
     const assignUrlRes = await chrome.scripting.executeScript({
       target: { tabId: newTabId },
       func: (assignName, forumModuleId) => {
-        // Strategy 0: Find the section that contains the forum module, then pick the
-        // assignment link inside that same section. This is the most reliable approach
-        // because it uses DOM structure rather than text matching.
         if (forumModuleId) {
           const forumEl = document.querySelector(`#module-${forumModuleId}, [id*="module-${forumModuleId}"]`);
           if (forumEl) {
             const section = forumEl.closest('li[id^="section-"], div[id^="section-"], .section.main, [data-sectionid]');
-            if (section) {
-              const sectionAssignLink = section.querySelector('a[href*="mod/assign/view.php"]');
-              if (sectionAssignLink) return sectionAssignLink.href;
-            }
+            const sectionAssignLink = section?.querySelector('a[href*="mod/assign/view.php"]');
+            if (sectionAssignLink) return sectionAssignLink.href;
           }
         }
-
-        // Fallback: text-based search across all assignment links on the page
         const links = Array.from(document.querySelectorAll('a[href*="mod/assign/view.php"]'));
         if (links.length === 0) return null;
-        if (!assignName || assignName === "null") return links[0].href;
-
-        const searchName = assignName.toLowerCase();
-
-        // Strategy A: Exact or close text match
-        for (const link of links) {
-          const linkText = link.textContent.toLowerCase();
-          if (linkText.includes(searchName)) {
-            if (!isNaN(searchName)) {
-              const regex = new RegExp(`\\b${searchName}\\b`);
-              if (regex.test(linkText)) return link.href;
-            } else {
-              return link.href;
-            }
-          }
-        }
-
-        // Strategy B: match by number
-        const matchNumber = assignName.match(/\d+/);
-        if (matchNumber) {
-          const num = matchNumber[0];
-          const regex = new RegExp(`\\b${num}\\b`);
-          for (const link of links) {
-            if (regex.test(link.textContent) && /תרגיל|מטלה|הגשה|assignment/i.test(link.textContent)) {
-              return link.href;
-            }
-          }
-          for (const link of links) {
-            if (regex.test(link.textContent)) return link.href;
-          }
-        }
-
-        // Strategy C: partial word match
-        const parts = searchName.split(' ');
-        for (const link of links) {
-          const linkText = link.textContent.toLowerCase();
-          for (const part of parts) {
-            if (part.length > 2 && linkText.includes(part)) return link.href;
-          }
-        }
-
-        return links[0].href;
+        const searchName = assignName?.toLowerCase();
+        if (!searchName || searchName === "null") return links[0].href;
+        return links.find(l => l.textContent.toLowerCase().includes(searchName))?.href || links[0].href;
       },
       args: [request.assignmentName ? String(request.assignmentName) : null, forumModuleId || null]
     });
 
     const assignUrl = assignUrlRes[0]?.result;
-    if (!assignUrl) throw new Error(`Could not find the assignment link on the course page.`);
+    if (!assignUrl) throw new Error("Assignment link not found.");
 
-    // 4. Navigate to Grading Page and extract sesskey + student userid
-    actionsContainer.innerHTML = '<span class="status-label processing">Finding student...</span>';
+    // 3. Navigate to Grading Page to get sesskey/userid
     const gradingUrl = new URL(assignUrl);
     gradingUrl.searchParams.set('action', 'grading');
     await chrome.tabs.update(newTabId, { url: gradingUrl.toString() });
@@ -585,96 +610,207 @@ async function handleApprove(index) {
     const studentInfoRes = await chrome.scripting.executeScript({
       target: { tabId: newTabId },
       func: (studentName) => {
-        const sesskey = window.M?.cfg?.sesskey
-          || document.querySelector('input[name="sesskey"]')?.value
-          || (() => { const m = document.cookie.match(/MoodleSession\w*=(\w+)/); return m?.[1]; })();
-
+        const sesskey = window.M?.cfg?.sesskey || document.querySelector('input[name="sesskey"]')?.value;
         const normalized = studentName.toLowerCase().trim();
         const rows = Array.from(document.querySelectorAll('tr'));
         for (const row of rows) {
           const nameEls = Array.from(row.querySelectorAll('td a, td .fullname'));
-          const matched = nameEls.find(el => {
-            const t = el.textContent.trim().toLowerCase();
-            return t.includes(normalized) || normalized.includes(t);
-          });
-          if (!matched) continue;
-
-          // Look for userid in any link in this row
-          for (const link of row.querySelectorAll('a[href]')) {
-            const m = link.href.match(/[?&]userid=(\d+)/);
+          if (nameEls.some(el => el.textContent.toLowerCase().includes(normalized))) {
+            const m = row.innerHTML.match(/[?&]userid=(\d+)/) || row.innerHTML.match(/[?&]id=(\d+)/);
             if (m) return { sesskey, userid: m[1] };
           }
-          // Fallback: profile link id
-          for (const link of row.querySelectorAll('a[href*="user/view.php"]')) {
-            const m = link.href.match(/[?&]id=(\d+)/);
-            if (m) return { sesskey, userid: m[1] };
-          }
-          return { sesskey, userid: null, rowHtml: row.innerHTML.substring(0, 300) };
         }
-        // No row matched — return first few names for debugging
-        const names = rows.flatMap(r => Array.from(r.querySelectorAll('td a, td .fullname')).map(e => e.textContent.trim())).filter(Boolean).slice(0, 10);
-        return { sesskey, userid: null, names };
+        return { sesskey, userid: null };
       },
       args: [request.studentName]
     });
 
-    const { sesskey, userid, names, rowHtml } = studentInfoRes[0]?.result || {};
-    console.log('[Tzar] sesskey:', sesskey, 'userid:', userid, 'names:', names, 'rowHtml:', rowHtml);
+    const { sesskey, userid } = studentInfoRes[0]?.result || {};
+    if (!userid || !sesskey) throw new Error(`Student "${request.studentName}" not found in grading table.`);
 
-    if (!userid) {
-      throw new Error(`Student "${request.studentName}" not found in grading table. Names seen: ${(names || []).join(', ')}`);
-    }
-    if (!sesskey) {
-      throw new Error('Could not extract sesskey from the grading page.');
-    }
-
-    // 5. Navigate directly to the grant extension page
-    actionsContainer.innerHTML = '<span class="status-label processing">Applying extension...</span>';
-    const grantUrl = new URL(assignUrl);
+    // 4. Grant Extension
+    grantUrl = new URL(assignUrl);
     grantUrl.searchParams.set('sesskey', sesskey);
-    grantUrl.searchParams.set('page', '0');
     grantUrl.searchParams.set('userid', userid);
     grantUrl.searchParams.set('action', 'grantextension');
-    console.log('[Tzar] navigating to grant URL:', grantUrl.toString());
+    
     await chrome.tabs.update(newTabId, { url: grantUrl.toString() });
     await waitForTabLoad(newTabId);
 
-
-    // 6. Fill in the extension date form
     const formResult = await chrome.scripting.executeScript({
       target: { tabId: newTabId },
       func: fillExtensionForm,
-      args: [finalDays] // FIX: Changed from requestedDays to finalDays
+      args: [finalDays]
     });
 
-    // 7. Wait for form submission then close the background tab
     await waitForTabLoad(newTabId);
-    chrome.tabs.remove(newTabId);
+    if (!formResult[0]?.result?.success) throw new Error(formResult[0]?.result?.error || "Extension form failed.");
 
-    const result = formResult[0]?.result;
-    console.log('[Tzar] form result:', JSON.stringify(result));
+    // 5. Post Forum Reply
+    actionsContainer.innerHTML = '<span class="status-label processing">Posting forum reply...</span>';
+    const replyResult = await postForumReply(request, finalDays, sesskey);
 
-    if (result && result.success) {
-      actionsContainer.innerHTML = '<span class="status-label processing">Posting forum reply...</span>';
-      const replyResult = await postForumReply(request, finalDays, sesskey);
-      if (replyResult.success) {
-        actionsContainer.innerHTML = `<span class="status-label approved">Approved for ${finalDays} days · Reply posted</span>`;
-      } else {
-        console.warn('[Tzar] Forum reply failed:', replyResult.error);
-        actionsContainer.innerHTML = `<span class="status-label approved">Approved for ${finalDays} days · Reply failed: ${escapeHtml(replyResult.error)}</span>`;
-      }
+    if (replyResult.success) {
+      actionsContainer.innerHTML = `<span class="status-label approved">Approved for ${finalDays} days · Reply posted</span>`;
+      chrome.tabs.remove(newTabId).catch(() => {});
       await updateSavedRequestStatus(index, true, finalDays);
     } else {
-      const msg = result?.error || 'Form fill failed.';
-      const debugInfo = result?.log ? '\n\nDebug:\n' + result.log.join('\n') : '\n\n(result: ' + JSON.stringify(result) + ')';
-      actionsContainer.innerHTML = `<span class="status-label rejected">Error: ${escapeHtml(msg)}${escapeHtml(debugInfo)}</span>`;
+      // --- ROLLBACK START ---
+      console.warn('[Tzar] Reply failed, rolling back extension...', replyResult.error);
+      actionsContainer.innerHTML = `<span class="status-label processing">Reply failed. Rolling back extension...</span>`;
+      
+      await rollbackExtension(newTabId, grantUrl.toString());
+      
+      actionsContainer.innerHTML = `<span class="status-label rejected">Error: Reply failed (${replyResult.error}). Extension cancelled.</span>`;
       actionControls.classList.remove('hidden');
+      chrome.tabs.remove(newTabId).catch(() => {});
+      // --- ROLLBACK END ---
     }
   } catch (err) {
-    console.log('[Tzar] outer catch:', err.message, err.stack);
     if (newTabId) chrome.tabs.remove(newTabId).catch(() => {});
-    actionsContainer.innerHTML = `<span class="status-label rejected">Error: ${escapeHtml(err.message)}</span>`;
+    actionsContainer.innerHTML = `<span class="status-label rejected">Error: ${err.message}</span>`;
     actionControls.classList.remove('hidden');
+  }
+}
+
+// Helper to undo the extension if notification fails
+async function rollbackExtension(tabId, grantUrl) {
+    try {
+        await chrome.tabs.update(tabId, { url: grantUrl });
+        await waitForTabLoad(tabId);
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            func: () => {
+                const checkbox = document.getElementById('id_extensionduedate_enabled');
+                if (checkbox && checkbox.checked) checkbox.click(); // Disable extension
+                const saveBtn = document.getElementById('id_submitbutton');
+                if (saveBtn) saveBtn.click();
+            }
+        });
+        await waitForTabLoad(tabId);
+    } catch (e) {
+        console.error('[Tzar] Rollback failed:', e);
+    }
+}
+
+// --- Robust postForumReply ---
+async function postForumReply(request, days, sesskey) {
+  try {
+    if (!request.discussUrl) {
+      return { success: false, error: 'Discussion URL not found for this student.' };
+    }
+
+    const newTab = await chrome.tabs.create({ url: request.discussUrl, active: false });
+    await waitForTabLoad(newTab.id);
+    
+    // Extract first name for a natural greeting
+    const firstName = request.studentName.trim().split(/\s+/)[0];
+    const msgStr = '\u05e9\u05dc\u05d5\u05dd ' + firstName + ', \u05d4\u05d5\u05d6\u05e0\u05d4 \u05dc\u05da \u05d4\u05d0\u05e8\u05db\u05d4 \u05e9\u05dc ' + days + ' \u05d9\u05de\u05d9\u05dd \u05dc\u05d4\u05d2\u05e9\u05ea \u05d4\u05ea\u05e8\u05d2\u05d9\u05dc. \u05d1\u05d4\u05e6\u05dc\u05d7\u05d4.';
+
+    // Find the specific reply link using name-matching
+    const findResult = await chrome.scripting.executeScript({
+      target: { tabId: newTab.id },
+      func: (studentName) => {
+        try {
+          const normalized = studentName.toLowerCase().trim();
+          const parts = normalized.split(/\s+/).filter(p => p.length > 1);
+          const posts = Array.from(document.querySelectorAll('.forumng-post, .forumpost'));
+          
+          let target = posts.find(p => {
+            const author = p.querySelector('.forumng-author, .author, .posting-author');
+            return author && parts.every(part => author.textContent.toLowerCase().includes(part));
+          });
+
+          if (!target && posts.length > 0) target = posts[0];
+          const link = target?.querySelector('a[href*="replyto="], .forumng-replylink a');
+          return link ? link.href : null;
+        } catch (e) { return null; }
+      },
+      args: [request.studentName]
+    });
+
+    const replyUrl = findResult[0]?.result;
+    if (!replyUrl) {
+      chrome.tabs.remove(newTab.id).catch(() => {});
+      return { success: false, error: 'Reply link not found.' };
+    }
+
+    // Step 2: Go to the reply form page
+    await chrome.tabs.update(newTab.id, { url: replyUrl });
+    await waitForTabLoad(newTab.id);
+    
+    // Important: wait for Moodle scripts and editors to fully initialize
+    await new Promise(r => setTimeout(r, 3000));
+
+    // Step 3: Inject text and force standard Moodle form submission
+    const submitResult = await chrome.scripting.executeScript({
+      target: { tabId: newTab.id },
+      world: 'MAIN', // Run in MAIN to access window.tinyMCE directly
+      func: async (message) => {
+        try {
+          const textarea = document.getElementById('id_message') || document.querySelector('textarea[name="message[text]"]');
+          const submitBtn = document.getElementById('id_submitbutton');
+          if (!textarea || !submitBtn) return { success: false, error: 'UI elements missing' };
+
+          // Sync content to TinyMCE if it exists
+          if (window.tinyMCE && window.tinyMCE.activeEditor) {
+            window.tinyMCE.activeEditor.setContent('<p>' + message + '</p>');
+            window.tinyMCE.triggerSave(); 
+          } else {
+            textarea.value = message;
+          }
+
+          // Reset dirty state to bypass "unsaved changes" popups
+          if (window.M && window.M.core_formchangechecker) {
+            window.M.core_formchangechecker.reset_form_dirty();
+          }
+
+          // requestSubmit is crucial: it simulates a button click that sends the button name/value
+          if (typeof submitBtn.form.requestSubmit === 'function') {
+            submitBtn.form.requestSubmit(submitBtn);
+          } else {
+            submitBtn.click();
+          }
+          
+          return { success: true };
+        } catch (e) { return { success: false, error: e.message }; }
+      },
+      args: [msgStr]
+    });
+
+    if (!submitResult[0]?.result?.success) {
+      chrome.tabs.remove(newTab.id).catch(() => {});
+      return { success: false, error: submitResult[0].result.error || 'Interaction failed' };
+    }
+
+    // Step 4: Verification loop - check if we navigated away from the form
+    let isSuccess = false;
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const tab = await chrome.tabs.get(newTab.id);
+      
+      // If the URL no longer contains editpost.php, it means the server accepted the form
+      if (tab.url && !tab.url.includes('editpost.php')) {
+        isSuccess = true;
+        break;
+      }
+
+      // Check if Moodle displayed an error message on the same page
+      const errorCheck = await chrome.scripting.executeScript({
+        target: { tabId: newTab.id },
+        func: () => !!document.querySelector('.error, .invalid-feedback:not(:empty)')
+      });
+      if (errorCheck[0]?.result) {
+        chrome.tabs.remove(newTab.id).catch(() => {});
+        return { success: false, error: 'Moodle form validation error' };
+      }
+    }
+
+    chrome.tabs.remove(newTab.id).catch(() => {});
+    return isSuccess ? { success: true } : { success: false, error: 'Form submission timed out' };
+
+  } catch (err) {
+    return { success: false, error: err.message };
   }
 }
 
@@ -779,143 +915,7 @@ function fillExtensionForm(daysToAdd) {
   }
 }
 
-async function postForumReply(request, days, sesskey) {
-  try {
-    const urlObj = new URL(currentForumUrl);
-    const basePath = urlObj.pathname.split('/mod/')[0];
-    
-    let discussionId = null;
-    let discussUrl = null;
 
-    const discrowMatch = request.postId && request.postId.match(/^discrow_(\d+)$/);
-    if (discrowMatch) {
-      discussionId = discrowMatch[1];
-      discussUrl = `${urlObj.origin}${basePath}/mod/forumng/discuss.php?d=${discussionId}`;
-    } else if (currentForumUrl.includes('discuss.php')) {
-      discussionId = urlObj.searchParams.get('d');
-      discussUrl = currentForumUrl;
-    }
-
-    if (!discussionId || !discussUrl) {
-      return { success: false, error: 'Cannot determine forum discussion URL' };
-    }
-
-    // Step 1: Open the discussion page
-    const newTab = await chrome.tabs.create({ url: discussUrl, active: false });
-    await waitForTabLoad(newTab.id);
-
-    // Keep unicode string external to execution scope
-    const msgStr = '\u05e9\u05dc\u05d5\u05dd ' + request.studentName + ', \u05d4\u05d5\u05d6\u05e0\u05d4 \u05dc\u05da \u05d4\u05d0\u05e8\u05db\u05d4 \u05e9\u05dc ' + days + ' \u05d9\u05de\u05d9\u05dd \u05dc\u05d4\u05d2\u05e9\u05ea \u05d4\u05ea\u05e8\u05d2\u05d9\u05dc. \u05d1\u05d4\u05e6\u05dc\u05d7\u05d4.';
-
-    // Step 2: Find the specific reply link for the student's post with improved matching
-    const submitResult = await chrome.scripting.executeScript({
-      target: { tabId: newTab.id },
-      func: (studentName, messageText) => {
-        try {
-            const normalizedName = studentName.toLowerCase().trim();
-            // Split name to parts to handle partial matches or different spacing
-            const searchWords = normalizedName.split(/\s+/).filter(w => w.length > 1);
-            const posts = Array.from(document.querySelectorAll('.forumng-post'));
-            
-            let targetPost = null;
-
-            for (const p of posts) {
-                const authorEl = p.querySelector('.forumng-author a, .author a, .posting-author a');
-                if (!authorEl) continue;
-                
-                const authorText = authorEl.textContent.trim().toLowerCase();
-                
-                // Match if all parts of the requested name are found in the post's author name
-                const isMatch = searchWords.every(word => authorText.includes(word));
-                
-                if (isMatch) {
-                    targetPost = p;
-                    break;
-                }
-            }
-            
-            // Fail gracefully instead of posting to a random student
-            if (!targetPost) {
-                return { success: false, error: 'Student post not found in this thread. Safety abort.' };
-            }
-            
-            const replyLinkEl = targetPost.querySelector('.forumng-replylink a');
-            if (!replyLinkEl) {
-                return { success: false, error: 'Reply link not found on the targeted post.' };
-            }
-            
-            return { success: true, replyUrl: replyLinkEl.href };
-        } catch (e) {
-            return { success: false, error: e.message };
-        }
-      },
-      args: [request.studentName, msgStr]
-    });
-
-    if (!submitResult[0]?.result?.success) {
-        chrome.tabs.remove(newTab.id).catch(() => {});
-        return { success: false, error: submitResult[0]?.result?.error };
-    }
-
-    // Step 3: Navigate directly to the specific reply form
-    const replyFormUrl = submitResult[0].result.replyUrl;
-    await chrome.tabs.update(newTab.id, { url: replyFormUrl });
-    await waitForTabLoad(newTab.id);
-
-    // Step 4: Fill the form in the DOM and click submit
-    const formResult = await chrome.scripting.executeScript({
-      target: { tabId: newTab.id },
-      func: (messageText) => {
-        try {
-            // Set the underlying hidden textarea
-            const textarea = document.querySelector('textarea[name="message[text]"]') || 
-                             document.querySelector('textarea[id^="id_message"]');
-            if (textarea) textarea.value = messageText;
-
-            // Set content in TinyMCE iframe
-            const tinymceIframe = document.querySelector('iframe.tox-edit-area__iframe');
-            if (tinymceIframe && tinymceIframe.contentDocument) {
-                const body = tinymceIframe.contentDocument.querySelector('body');
-                if (body) body.innerHTML = '<p>' + messageText + '</p>';
-            }
-
-            // Set content in Atto editor (older Moodle default)
-            const attoEditor = document.querySelector('.editor_atto_content');
-            if (attoEditor) {
-                attoEditor.innerHTML = '<p>' + messageText + '</p>';
-            }
-
-            // Find and click the submit button
-            const submitBtn = document.querySelector('input[type="submit"][name="submitbutton"]') ||
-                              document.querySelector('button[type="submit"][name="submitbutton"]') ||
-                              document.querySelector('#id_submitbutton');
-                              
-            if (!submitBtn) return { success: false, error: 'Submit button not found on page.' };
-
-            submitBtn.click();
-            return { success: true };
-        } catch (e) {
-            return { success: false, error: e.message };
-        }
-      },
-      args: [msgStr]
-    });
-
-    if (!formResult[0]?.result?.success) {
-        chrome.tabs.remove(newTab.id).catch(() => {});
-        return { success: false, error: formResult[0]?.result?.error };
-    }
-
-    // Step 5: Wait for the POST request to finish
-    await waitForTabLoad(newTab.id);
-    chrome.tabs.remove(newTab.id).catch(() => {});
-    
-    return { success: true };
-
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-}
 
 function setScanLoading(loading) {
   elements.scanForumBtn.disabled = loading;
