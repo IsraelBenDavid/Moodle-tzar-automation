@@ -6,6 +6,9 @@ import { MOODLE_HOST, DEFAULT_MODEL_CHOICE } from '../utils/constants.js';
 
 document.addEventListener('DOMContentLoaded', init);
 
+let isProcessingApproval = false;
+let approvalQueue = [];
+
 // State
 let extensionRequests = [];
 let currentTabId = null;
@@ -357,15 +360,31 @@ async function extractForumPosts() {
         const discussUrl = topicLinkEl ? topicLinkEl.href : null;
         if (!discussUrl) return null;
 
-        // All user links in the row: first = original poster, last = last replier.
-        const userLinks = Array.from(row.querySelectorAll('a[href*="user/view.php"], a[data-userid]'));
-        if (userLinks.length === 0) return null;
+        const startedByLink = row.querySelector('.forumng-startedby a[href*="user/view.php"], .forumng-startedby a[data-userid], .author a[href*="user/view.php"], .starter a[href*="user/view.php"]');
+        const lastPostLink = row.querySelector('.forumng-lastpost a[href*="user/view.php"], .forumng-lastpost a[data-userid], .lastpost a[href*="user/view.php"]');
 
-        const originalAuthor = userLinks[0].textContent.trim();
-        const lastReplier = userLinks[userLinks.length - 1].textContent.trim();
-        // If someone other than the original poster was the last to reply, the thread has a reply.
-        const isAnswered = userLinks.length > 1 &&
-          lastReplier.toLowerCase() !== originalAuthor.toLowerCase();
+        if (!startedByLink || !lastPostLink) return null;
+
+        const getUserId = (link) => {
+            try {
+                if (link.hasAttribute('data-userid')) return link.getAttribute('data-userid');
+                const url = new URL(link.href, window.location.origin);
+                return url.searchParams.get('id');
+            } catch (e) {
+                return null;
+            }
+        };
+
+        const startedById = getUserId(startedByLink);
+        const lastPostId = getUserId(lastPostLink);
+
+        const isAnswered = startedById !== lastPostId;
+
+        let originalAuthor = startedByLink.textContent.trim();
+        const initialsSpan = startedByLink.querySelector('.userinitials');
+        if (initialsSpan) {
+            originalAuthor = initialsSpan.getAttribute('title') || originalAuthor.replace(initialsSpan.textContent, '').trim();
+        }
 
         try {
           const resp = await fetch(discussUrl);
@@ -486,7 +505,37 @@ function waitForTabLoad(tabId) {
 // ---- Actions ----
 
 // --- Updated handleApprove with Rollback logic ---
+
 async function handleApprove(index) {
+    approvalQueue.push(index);
+    
+    const card = elements.requestsList.querySelector(`[data-index="${index}"]`);
+    const actionsContainer = card.querySelector('.actions');
+    const actionControls = card.querySelector('.action-controls');
+    
+    actionControls.classList.add('hidden');
+    actionsContainer.innerHTML = '<span class="status-label processing">Queued...</span>';
+
+    processQueue();
+}
+
+async function processQueue() {
+    if (isProcessingApproval || approvalQueue.length === 0) {
+        return;
+    }
+    
+    isProcessingApproval = true;
+    const currentIndex = approvalQueue.shift();
+    
+    try {
+        await executeApproval(currentIndex);
+    } finally {
+        isProcessingApproval = false;
+        processQueue(); 
+    }
+}
+
+async function executeApproval(index) {
   const request = extensionRequests[index];
   const card = elements.requestsList.querySelector(`[data-index="${index}"]`);
   const actionsContainer = card.querySelector('.actions');
@@ -497,171 +546,219 @@ async function handleApprove(index) {
   let finalDays = (daysSelect.value === 'custom') ? (parseInt(customInput.value, 10) || 3) : parseInt(daysSelect.value, 10);
 
   request.requestedDays = finalDays;
-  actionControls.classList.add('hidden');
   actionsContainer.innerHTML = '<span class="status-label processing">Applying extension...</span>';
-
-  let newTabId = null;
-  let grantUrl = null;
 
   try {
     const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-    // 1. Get Course URL and Module ID
-    const courseUrlRes = await chrome.scripting.executeScript({
+    const processRes = await chrome.scripting.executeScript({
       target: { tabId: currentTab.id },
-      func: () => {
-        const navLinks = Array.from(document.querySelectorAll('.breadcrumb a, nav[aria-label="Breadcrumb"] a, nav[aria-label="נתיב"] a, .breadcrumb-nav a'));
-        const courseLink = navLinks.find(a => a.href.includes('course/view.php'));
-        const moduleId = new URLSearchParams(window.location.search).get('id');
-        return { courseUrl: courseLink ? courseLink.href : null, moduleId };
-      }
-    });
+      func: async (studentName, assignmentName, daysToAdd) => {
+        try {
+          // 1. Extract Course URL
+          const navLinks = Array.from(document.querySelectorAll('.breadcrumb a, nav[aria-label="Breadcrumb"] a, nav[aria-label="נתיב"] a, .breadcrumb-nav a'));
+          const courseLink = navLinks.find(a => a.href.includes('course/view.php'));
+          if (!courseLink) throw new Error("Course URL not found.");
+          const courseUrl = courseLink.href;
+          const forumModuleId = new URLSearchParams(window.location.search).get('id');
 
-    const { courseUrl, moduleId: forumModuleId } = courseUrlRes[0]?.result || {};
-    if (!courseUrl) throw new Error("Could not find course URL.");
+          // 2. Fetch course page to locate assignment URL
+          const courseResp = await fetch(courseUrl);
+          const courseHtml = await courseResp.text();
+          const courseDoc = new DOMParser().parseFromString(courseHtml, 'text/html');
 
-    const newTab = await chrome.tabs.create({ url: courseUrl, active: false });
-    newTabId = newTab.id;
-    await waitForTabLoad(newTabId);
-
-    // 2. Find Assignment URL
-    const assignUrlRes = await chrome.scripting.executeScript({
-      target: { tabId: newTabId },
-      func: (assignName, forumModuleId) => {
-        if (forumModuleId) {
-          const forumEl = document.querySelector(`#module-${forumModuleId}, [id*="module-${forumModuleId}"]`);
-          if (forumEl) {
-            const section = forumEl.closest('li[id^="section-"], div[id^="section-"], .section.main, [data-sectionid]');
-            const sectionAssignLink = section?.querySelector('a[href*="mod/assign/view.php"]');
-            if (sectionAssignLink) return sectionAssignLink.href;
+          let assignUrl = null;
+          if (forumModuleId) {
+            const forumEl = courseDoc.querySelector(`#module-${forumModuleId}, [id*="module-${forumModuleId}"]`);
+            if (forumEl) {
+              const section = forumEl.closest('li[id^="section-"], div[id^="section-"], .section.main, [data-sectionid]');
+              const sectionAssignLink = section?.querySelector('a[href*="mod/assign/view.php"]');
+              if (sectionAssignLink) assignUrl = sectionAssignLink.href;
+            }
           }
-        }
-        const links = Array.from(document.querySelectorAll('a[href*="mod/assign/view.php"]'));
-        if (links.length === 0) return null;
-        const searchName = assignName?.toLowerCase();
-        if (!searchName || searchName === "null") return links[0].href;
-        return links.find(l => l.textContent.toLowerCase().includes(searchName))?.href || links[0].href;
-      },
-      args: [request.assignmentName ? String(request.assignmentName) : null, forumModuleId || null]
-    });
-
-    const assignUrl = assignUrlRes[0]?.result;
-    if (!assignUrl) throw new Error("Assignment link not found.");
-
-    // 3. Navigate to Grading Page to get sesskey/userid
-    const gradingUrl = new URL(assignUrl);
-    gradingUrl.searchParams.set('action', 'grading');
-    await chrome.tabs.update(newTabId, { url: gradingUrl.toString() });
-    await waitForTabLoad(newTabId);
-
-    const studentInfoRes = await chrome.scripting.executeScript({
-      target: { tabId: newTabId },
-      func: (studentName) => {
-        const sesskey = window.M?.cfg?.sesskey || document.querySelector('input[name="sesskey"]')?.value;
-        const normalized = studentName.toLowerCase().trim();
-        const rows = Array.from(document.querySelectorAll('tr'));
-        for (const row of rows) {
-          const nameEls = Array.from(row.querySelectorAll('td a, td .fullname'));
-          if (nameEls.some(el => el.textContent.toLowerCase().includes(normalized))) {
-            const m = row.innerHTML.match(/[?&]userid=(\d+)/) || row.innerHTML.match(/[?&]id=(\d+)/);
-            if (m) return { sesskey, userid: m[1] };
+          if (!assignUrl) {
+            const links = Array.from(courseDoc.querySelectorAll('a[href*="mod/assign/view.php"]'));
+            if (links.length > 0) {
+              const searchName = assignmentName?.toLowerCase();
+              assignUrl = searchName && searchName !== "null" 
+                ? (links.find(l => l.textContent.toLowerCase().includes(searchName))?.href || links[0].href)
+                : links[0].href;
+            }
           }
+          if (!assignUrl) throw new Error("Assignment link not found.");
+
+          // 3. Fetch grading page to extract user ID and sesskey
+          const gradingUrl = new URL(assignUrl);
+          gradingUrl.searchParams.set('action', 'grading');
+          const gradingResp = await fetch(gradingUrl.toString());
+          const gradingHtml = await gradingResp.text();
+          const gradingDoc = new DOMParser().parseFromString(gradingHtml, 'text/html');
+
+          const sesskey = gradingDoc.querySelector('input[name="sesskey"]')?.value;
+          let userid = null;
+          const normalized = studentName.toLowerCase().trim();
+          
+          for (const row of Array.from(gradingDoc.querySelectorAll('tr'))) {
+            const nameEls = Array.from(row.querySelectorAll('td a, td .fullname'));
+            if (nameEls.some(el => el.textContent.toLowerCase().includes(normalized))) {
+              const m = row.innerHTML.match(/[?&]userid=(\d+)/) || row.innerHTML.match(/[?&]id=(\d+)/);
+              if (m) { userid = m[1]; break; }
+            }
+          }
+          if (!userid || !sesskey) throw new Error(`Student not found in grading table.`);
+
+          // 4. Fetch grant extension page
+          const grantUrl = new URL(assignUrl);
+          grantUrl.searchParams.set('action', 'grantextension');
+          grantUrl.searchParams.set('userid', userid);
+          grantUrl.searchParams.set('sesskey', sesskey);
+
+          const grantResp = await fetch(grantUrl.toString());
+          const grantHtml = await grantResp.text();
+          const grantDoc = new DOMParser().parseFromString(grantHtml, 'text/html');
+
+          // Find specific date elements first by ID or name to avoid selecting a wrong search/header form
+          const dayEl = grantDoc.querySelector('#id_extensionduedate_day, [name="extensionduedate[day]"]');
+          const monthEl = grantDoc.querySelector('#id_extensionduedate_month, [name="extensionduedate[month]"]');
+          const yearEl = grantDoc.querySelector('#id_extensionduedate_year, [name="extensionduedate[year]"]');
+          
+          if (!dayEl || !monthEl || !yearEl) throw new Error("Date fields not found in form.");
+          
+          // Get the parent form of the date fields specifically
+          const form = dayEl.closest('form');
+          if (!form) throw new Error("Form wrapper not found for date fields.");
+
+          const hourEl = grantDoc.querySelector('#id_extensionduedate_hour, [name="extensionduedate[hour]"]');
+          const minEl = grantDoc.querySelector('#id_extensionduedate_minute, [name="extensionduedate[minute]"]');
+
+          const formData = new FormData(form);
+
+          const year = parseInt(yearEl.value);
+          const month = parseInt(monthEl.value) - 1;
+          const day = parseInt(dayEl.value);
+          const hour = hourEl ? parseInt(hourEl.value) : 23;
+          const min = minEl ? parseInt(minEl.value) : 59;
+
+          // Calculate new date
+          const target = new Date(year, month, day, hour, min);
+          target.setDate(target.getDate() + daysToAdd);
+
+          // Force set the new enabled date properties in the payload
+          formData.set('extensionduedate[enabled]', '1');
+          formData.set('extensionduedate[year]', target.getFullYear());
+          formData.set('extensionduedate[month]', target.getMonth() + 1);
+          formData.set('extensionduedate[day]', target.getDate());
+          formData.set('extensionduedate[hour]', target.getHours());
+          formData.set('extensionduedate[minute]', target.getMinutes());
+
+          const submitBtn = form.querySelector('input[type="submit"], button[type="submit"], #id_submitbutton');
+          if (submitBtn && submitBtn.name) formData.set(submitBtn.name, submitBtn.value || 'Save changes');
+          else formData.set('submitbutton', 'Save changes');
+
+          // Convert FormData to URLSearchParams to force application/x-www-form-urlencoded
+          const urlEncodedData = new URLSearchParams();
+          for (const [key, value] of formData.entries()) {
+              urlEncodedData.append(key, value);
+          }
+
+          const actionUrl = new URL(form.getAttribute('action') || grantUrl.toString(), window.location.href);
+
+          // 5. Submit the extension via POST
+          const postResp = await fetch(actionUrl.toString(), { 
+              method: 'POST', 
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: urlEncodedData 
+          });
+          
+          const postHtmlText = await postResp.text();
+          if (postHtmlText.includes('class="error"') || postHtmlText.includes('invalid-feedback')) {
+              throw new Error("Server rejected the extension form.");
+          }
+
+          return { success: true, sesskey, grantUrl: grantUrl.toString() };
+        } catch (err) {
+          return { success: false, error: err.message };
         }
-        return { sesskey, userid: null };
       },
-      args: [request.studentName]
+      args: [request.studentName, request.assignmentName, finalDays]
     });
 
-    const { sesskey, userid } = studentInfoRes[0]?.result || {};
-    if (!userid || !sesskey) throw new Error(`Student "${request.studentName}" not found in grading table.`);
+    const extensionResult = processRes[0]?.result;
+    if (!extensionResult || !extensionResult.success) {
+      throw new Error(extensionResult?.error || "Failed to process extension.");
+    }
 
-    // 4. Grant Extension
-    grantUrl = new URL(assignUrl);
-    grantUrl.searchParams.set('sesskey', sesskey);
-    grantUrl.searchParams.set('userid', userid);
-    grantUrl.searchParams.set('action', 'grantextension');
-    
-    await chrome.tabs.update(newTabId, { url: grantUrl.toString() });
-    await waitForTabLoad(newTabId);
-
-    const formResult = await chrome.scripting.executeScript({
-      target: { tabId: newTabId },
-      func: fillExtensionForm,
-      args: [finalDays]
-    });
-
-    await waitForTabLoad(newTabId);
-    if (!formResult[0]?.result?.success) throw new Error(formResult[0]?.result?.error || "Extension form failed.");
-
-    // 5. Post Forum Reply
     actionsContainer.innerHTML = '<span class="status-label processing">Posting forum reply...</span>';
-    const replyResult = await postForumReply(request, finalDays, sesskey);
+    
+    const replyResult = await postForumReply(currentTab.id, request, finalDays, extensionResult.sesskey);
 
     if (replyResult.success) {
       actionsContainer.innerHTML = `<span class="status-label approved">Approved for ${finalDays} days · Reply posted</span>`;
-      chrome.tabs.remove(newTabId).catch(() => {});
       await updateSavedRequestStatus(index, true, finalDays);
     } else {
-      // --- ROLLBACK START ---
-      console.warn('[Tzar] Reply failed, rolling back extension...', replyResult.error);
       actionsContainer.innerHTML = `<span class="status-label processing">Reply failed. Rolling back extension...</span>`;
       
-      await rollbackExtension(newTabId, grantUrl.toString());
+      // Rollback logic handling
+      await chrome.scripting.executeScript({
+         target: { tabId: currentTab.id },
+         func: async (grantUrlStr) => {
+             try {
+                 const resp = await fetch(grantUrlStr);
+                 const html = await resp.text();
+                 const doc = new DOMParser().parseFromString(html, 'text/html');
+                 
+                 const dayEl = doc.querySelector('#id_extensionduedate_day, [name="extensionduedate[day]"]');
+                 if(!dayEl) return;
+                 const form = dayEl.closest('form');
+                 if(form) {
+                     const fd = new FormData(form);
+                     fd.set('extensionduedate[enabled]', '0'); // Explicitly disable extension
+                     const btn = form.querySelector('input[type="submit"], #id_submitbutton');
+                     if(btn && btn.name) fd.set(btn.name, btn.value || 'Save changes');
+                     else fd.set('submitbutton', 'Save changes');
+                     
+                     const params = new URLSearchParams();
+                     for (const [k, v] of fd.entries()) params.append(k, v);
+                     
+                     const actionUrl = new URL(form.getAttribute('action') || grantUrlStr, window.location.href);
+                     await fetch(actionUrl.toString(), { 
+                         method: 'POST', 
+                         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                         body: params 
+                     });
+                 }
+             } catch(e) {}
+         },
+         args: [extensionResult.grantUrl]
+      });
       
       actionsContainer.innerHTML = `<span class="status-label rejected">Error: Reply failed (${replyResult.error}). Extension cancelled.</span>`;
       actionControls.classList.remove('hidden');
-      chrome.tabs.remove(newTabId).catch(() => {});
-      // --- ROLLBACK END ---
     }
   } catch (err) {
-    if (newTabId) chrome.tabs.remove(newTabId).catch(() => {});
     actionsContainer.innerHTML = `<span class="status-label rejected">Error: ${err.message}</span>`;
     actionControls.classList.remove('hidden');
   }
 }
 
-// Helper to undo the extension if notification fails
-async function rollbackExtension(tabId, grantUrl) {
-    try {
-        await chrome.tabs.update(tabId, { url: grantUrl });
-        await waitForTabLoad(tabId);
-        await chrome.scripting.executeScript({
-            target: { tabId },
-            func: () => {
-                const checkbox = document.getElementById('id_extensionduedate_enabled');
-                if (checkbox && checkbox.checked) checkbox.click(); // Disable extension
-                const saveBtn = document.getElementById('id_submitbutton');
-                if (saveBtn) saveBtn.click();
-            }
-        });
-        await waitForTabLoad(tabId);
-    } catch (e) {
-        console.error('[Tzar] Rollback failed:', e);
-    }
-}
-
-// --- Robust postForumReply ---
-async function postForumReply(request, days, sesskey) {
+async function postForumReply(tabId, request, days, sesskey) {
   try {
-    if (!request.discussUrl) {
-      return { success: false, error: 'Discussion URL not found for this student.' };
-    }
+    if (!request.discussUrl) return { success: false, error: 'Discussion URL not found.' };
 
-    const newTab = await chrome.tabs.create({ url: request.discussUrl, active: false });
-    await waitForTabLoad(newTab.id);
-    
-    // Extract first name for a natural greeting
     const firstName = request.studentName.trim().split(/\s+/)[0];
     const msgStr = '\u05e9\u05dc\u05d5\u05dd ' + firstName + ', \u05d4\u05d5\u05d6\u05e0\u05d4 \u05dc\u05da \u05d4\u05d0\u05e8\u05db\u05d4 \u05e9\u05dc ' + days + ' \u05d9\u05de\u05d9\u05dd \u05dc\u05d4\u05d2\u05e9\u05ea \u05d4\u05ea\u05e8\u05d2\u05d9\u05dc. \u05d1\u05d4\u05e6\u05dc\u05d7\u05d4.';
 
-    // Find the specific reply link using name-matching
-    const findResult = await chrome.scripting.executeScript({
-      target: { tabId: newTab.id },
-      func: (studentName) => {
+    const replyRes = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: async (discussUrl, studentName, message) => {
         try {
+          const discResp = await fetch(discussUrl);
+          const discHtml = await discResp.text();
+          const discDoc = new DOMParser().parseFromString(discHtml, 'text/html');
+
           const normalized = studentName.toLowerCase().trim();
           const parts = normalized.split(/\s+/).filter(p => p.length > 1);
-          const posts = Array.from(document.querySelectorAll('.forumng-post, .forumpost'));
+          const posts = Array.from(discDoc.querySelectorAll('.forumng-post, .forumpost'));
           
           let target = posts.find(p => {
             const author = p.querySelector('.forumng-author, .author, .posting-author');
@@ -669,97 +766,58 @@ async function postForumReply(request, days, sesskey) {
           });
 
           if (!target && posts.length > 0) target = posts[0];
-          const link = target?.querySelector('a[href*="replyto="], .forumng-replylink a');
-          return link ? link.href : null;
-        } catch (e) { return null; }
-      },
-      args: [request.studentName]
-    });
+          const replyLink = target?.querySelector('a[href*="replyto="], .forumng-replylink a');
+          if (!replyLink) throw new Error("Reply link not found.");
 
-    const replyUrl = findResult[0]?.result;
-    if (!replyUrl) {
-      chrome.tabs.remove(newTab.id).catch(() => {});
-      return { success: false, error: 'Reply link not found.' };
-    }
+          const replyResp = await fetch(replyLink.href);
+          const replyHtml = await replyResp.text();
+          const replyDoc = new DOMParser().parseFromString(replyHtml, 'text/html');
 
-    // Step 2: Go to the reply form page
-    await chrome.tabs.update(newTab.id, { url: replyUrl });
-    await waitForTabLoad(newTab.id);
-    
-    // Important: wait for Moodle scripts and editors to fully initialize
-    await new Promise(r => setTimeout(r, 3000));
+          const form = replyDoc.querySelector('form[action*="editpost.php"]');
+          if (!form) throw new Error("Reply form not found.");
 
-    // Step 3: Inject text and force standard Moodle form submission
-    const submitResult = await chrome.scripting.executeScript({
-      target: { tabId: newTab.id },
-      world: 'MAIN', // Run in MAIN to access window.tinyMCE directly
-      func: async (message) => {
-        try {
-          const textarea = document.getElementById('id_message') || document.querySelector('textarea[name="message[text]"]');
-          const submitBtn = document.getElementById('id_submitbutton');
-          if (!textarea || !submitBtn) return { success: false, error: 'UI elements missing' };
-
-          // Sync content to TinyMCE if it exists
-          if (window.tinyMCE && window.tinyMCE.activeEditor) {
-            window.tinyMCE.activeEditor.setContent('<p>' + message + '</p>');
-            window.tinyMCE.triggerSave(); 
-          } else {
-            textarea.value = message;
-          }
-
-          // Reset dirty state to bypass "unsaved changes" popups
-          if (window.M && window.M.core_formchangechecker) {
-            window.M.core_formchangechecker.reset_form_dirty();
-          }
-
-          // requestSubmit is crucial: it simulates a button click that sends the button name/value
-          if (typeof submitBtn.form.requestSubmit === 'function') {
-            submitBtn.form.requestSubmit(submitBtn);
-          } else {
-            submitBtn.click();
-          }
+          const formData = new FormData(form);
+          const textarea = form.querySelector('textarea[name*="message"]');
+          const msgName = textarea ? textarea.name : 'message[text]';
           
+          formData.set(msgName, '<p>' + message + '</p>');
+          
+          const submitBtn = form.querySelector('input[type="submit"], button[type="submit"], #id_submitbutton');
+          if (submitBtn && submitBtn.name) formData.append(submitBtn.name, submitBtn.value || 'Submit');
+          else formData.append('submitbutton', 'Post to forum');
+
+          const actionUrl = new URL(form.getAttribute('action') || replyLink.href, window.location.href);
+
+          const postResp = await fetch(actionUrl.toString(), {
+            method: form.getAttribute('method') || 'POST',
+            body: formData
+          });
+
+          if (postResp.ok && !postResp.url.includes('editpost.php')) {
+            return { success: true };
+          } else if (postResp.url.includes('editpost.php')) {
+            const text = await postResp.text();
+            if (text.includes('class="error"') || text.includes('invalid-feedback')) {
+                return { success: false, error: 'Moodle form validation error' };
+            }
+            return { success: false, error: 'Server rejected the reply form data' };
+          }
           return { success: true };
-        } catch (e) { return { success: false, error: e.message }; }
+        } catch (err) {
+          return { success: false, error: err.message };
+        }
       },
-      args: [msgStr]
+      args: [request.discussUrl, request.studentName, msgStr]
     });
 
-    if (!submitResult[0]?.result?.success) {
-      chrome.tabs.remove(newTab.id).catch(() => {});
-      return { success: false, error: submitResult[0].result.error || 'Interaction failed' };
-    }
-
-    // Step 4: Verification loop - check if we navigated away from the form
-    let isSuccess = false;
-    for (let i = 0; i < 10; i++) {
-      await new Promise(r => setTimeout(r, 1000));
-      const tab = await chrome.tabs.get(newTab.id);
-      
-      // If the URL no longer contains editpost.php, it means the server accepted the form
-      if (tab.url && !tab.url.includes('editpost.php')) {
-        isSuccess = true;
-        break;
-      }
-
-      // Check if Moodle displayed an error message on the same page
-      const errorCheck = await chrome.scripting.executeScript({
-        target: { tabId: newTab.id },
-        func: () => !!document.querySelector('.error, .invalid-feedback:not(:empty)')
-      });
-      if (errorCheck[0]?.result) {
-        chrome.tabs.remove(newTab.id).catch(() => {});
-        return { success: false, error: 'Moodle form validation error' };
-      }
-    }
-
-    chrome.tabs.remove(newTab.id).catch(() => {});
-    return isSuccess ? { success: true } : { success: false, error: 'Form submission timed out' };
-
+    return replyRes[0]?.result || { success: false, error: "Failed to execute script." };
   } catch (err) {
     return { success: false, error: err.message };
   }
 }
+
+
+
 
 async function handleReject(index) {
   const card = elements.requestsList.querySelector(`[data-index="${index}"]`);
@@ -782,85 +840,7 @@ async function updateSavedRequestStatus(index, isApproved, days) {
      }
 }
 
-// Injected into the grant-extension page — fills the date form and submits.
-function fillExtensionForm(daysToAdd) {
-  const log = [];
-  try {
-    log.push(`URL: ${location.href}`);
 
-    // Enable the extension date checkbox first so the selects are active
-    const enableCheckbox = document.getElementById('id_extensionduedate_enabled');
-    if (enableCheckbox && !enableCheckbox.checked) {
-      enableCheckbox.click();
-      log.push('clicked enable checkbox');
-    }
-
-    // Find standard Moodle date selectors by ID
-    const day = document.getElementById('id_extensionduedate_day');
-    const month = document.getElementById('id_extensionduedate_month');
-    const year = document.getElementById('id_extensionduedate_year');
-    const hour = document.getElementById('id_extensionduedate_hour');
-    const min = document.getElementById('id_extensionduedate_minute');
-
-    if (!day || !month || !year) {
-      log.push(`day=${!!day} month=${!!month} year=${!!year} hour=${!!hour} min=${!!min}`);
-      return { success: false, error: 'Date fields not found.', log };
-    }
-
-    // Build base date from the current values already in the form (the assignment's due date)
-    const base = new Date(
-      parseInt(year.value),
-      parseInt(month.value) - 1,
-      parseInt(day.value),
-      hour ? parseInt(hour.value) : 23,
-      min  ? parseInt(min.value)  : 59
-    );
-    log.push(`base date from form: ${base.toISOString()}`);
-
-    const target = new Date(base);
-    target.setDate(target.getDate() + daysToAdd);
-    const targetDate = {
-      day: target.getDate(),
-      month: target.getMonth() + 1,
-      year: target.getFullYear(),
-      hour: target.getHours(),
-      minute: target.getMinutes()
-    };
-    log.push(`target date: ${JSON.stringify(targetDate)}`);
-
-    function setSelect(el, value) {
-      if (!el) return false;
-      el.value = String(value);
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }
-
-    setSelect(day, targetDate.day);
-    setSelect(month, targetDate.month);
-    setSelect(year, targetDate.year);
-    setSelect(hour, targetDate.hour);
-    setSelect(min, targetDate.minute);
-    log.push('date set via selects');
-
-    // Click the specific Moodle save button
-    const saveBtn = document.getElementById('id_submitbutton');
-
-    if (!saveBtn) {
-      return { success: false, error: 'Save button not found.', log };
-    }
-
-    log.push('clicking save button');
-    // Return a promise so the caller waits for navigation
-    return new Promise((resolve) => {
-      window.addEventListener('beforeunload', () => resolve({ success: true, log }), { once: true });
-      setTimeout(() => resolve({ success: true, log }), 5000); // fallback
-      saveBtn.click();
-    });
-  } catch (err) {
-    log.push(`exception: ${err.message}`);
-    return { success: false, error: err.message, log };
-  }
-}
 
 
 
