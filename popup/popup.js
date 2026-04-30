@@ -458,6 +458,7 @@ function renderRequests() {
       <div class="action-controls">
         <select class="days-select" data-index="${index}">
           <option value="3" ${initialDays === 3 ? 'selected' : ''}>3 Days</option>
+          <option value="4" ${initialDays === 4 ? 'selected' : ''}>4 Days</option>
           <option value="7" ${initialDays === 7 ? 'selected' : ''}>7 Days</option>
           <option value="custom" ${initialDays !== 3 && initialDays !== 7 ? 'selected' : ''}>Other...</option>
         </select>
