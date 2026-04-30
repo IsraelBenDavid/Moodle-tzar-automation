@@ -297,13 +297,112 @@ select {
   height: 28px;
 }
 
-.request-card .status-label {
+.action-controls input[type="time"] {
+  width: 95px;
+  padding: 4px 6px;
+  height: 28px;
+  font-size: 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.time-separator {
+  font-size: 12px;
+  color: #64748b;
+  align-self: center;
+  white-space: nowrap;
+}
+
+/* Deadline Info */
+.deadline-info {
+  font-size: 12px;
+  font-weight: 500;
+  color: #475569;
+  margin-top: 6px;
+}
+
+.request-card .deadline-info {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: 4px 8px;
   display: inline-block;
-  margin-top: 10px;
+}
+
+/* Custom Reply */
+.custom-reply-row {
+  margin-top: 8px;
+}
+
+.custom-reply-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: normal;
+  color: #64748b;
+  cursor: pointer;
+  margin-bottom: 4px;
+}
+
+.custom-reply-toggle-label input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
+.custom-reply-textarea {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+  background: #fff;
+}
+
+.custom-reply-textarea:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+/* Direct Extension Section */
+.direct-student-label {
+  font-weight: 600;
+  font-size: 14px;
+  color: #1e293b;
+  margin-bottom: 8px;
+}
+
+#direct-extension-section .section-body {
+  padding-top: 4px;
+}
+
+#direct-extension-section input[type="text"] {
+  margin-top: 8px;
+}
+
+#direct-extension-section .action-controls {
+  margin-top: 8px;
+}
+
+/* General status-label base (for use outside .request-card) */
+.status-label {
+  display: inline-block;
   padding: 4px 10px;
   border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
+}
+
+.request-card .status-label {
+  margin-top: 10px;
+}
+
+#direct-extension-status {
+  margin-top: 8px;
 }
 
 .status-label.approved {

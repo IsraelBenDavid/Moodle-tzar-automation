@@ -51,6 +51,37 @@
       <div id="scan-status" class="status-msg"></div>
     </section>
 
+    <!-- Direct Extension Section (shown when viewing a specific forum discussion) -->
+    <section id="direct-extension-section" class="section hidden">
+      <div class="section-header">
+        <span class="section-title">Direct Extension</span>
+      </div>
+      <div class="section-body">
+        <div id="direct-student-label" class="direct-student-label"></div>
+        <div id="direct-deadline-info" class="deadline-info"></div>
+        <input type="text" id="direct-assignment-name" placeholder="Assignment name (auto-detect if blank)">
+        <div class="action-controls">
+          <select id="direct-days-select">
+            <option value="3">3 Days</option>
+            <option value="4">4 Days</option>
+            <option value="7">7 Days</option>
+            <option value="custom">Other...</option>
+          </select>
+          <input type="number" id="direct-custom-days" class="custom-days-input hidden" value="3" min="1">
+          <span class="time-separator">at</span>
+          <input type="time" id="direct-time-override" title="Override submission time (leave blank to keep original)">
+          <button id="direct-grant-btn" class="btn btn-approve">Grant Extension</button>
+        </div>
+        <div class="custom-reply-row">
+          <label class="custom-reply-toggle-label">
+            <input type="checkbox" id="direct-custom-reply-toggle"> Custom reply
+          </label>
+          <textarea id="direct-custom-reply-text" class="custom-reply-textarea hidden" rows="3" dir="rtl" placeholder="Custom reply message..."></textarea>
+        </div>
+        <div id="direct-extension-status" class="actions"></div>
+      </div>
+    </section>
+
     <!-- Results Section -->
     <section id="results-section" class="section hidden">
       <div class="section-header">

@@ -13,6 +13,7 @@ let approvalQueue = [];
 let extensionRequests = [];
 let currentTabId = null;
 let currentForumUrl = null;
+let directStudentName = null;
 
 // DOM references
 const elements = {};
@@ -43,6 +44,17 @@ function cacheElements() {
   elements.requestsList = document.getElementById('requests-list');
   elements.requestCount = document.getElementById('request-count');
   elements.errorBanner = document.getElementById('error-banner');
+  elements.directExtensionSection = document.getElementById('direct-extension-section');
+  elements.directStudentLabel = document.getElementById('direct-student-label');
+  elements.directAssignmentName = document.getElementById('direct-assignment-name');
+  elements.directDaysSelect = document.getElementById('direct-days-select');
+  elements.directCustomDays = document.getElementById('direct-custom-days');
+  elements.directGrantBtn = document.getElementById('direct-grant-btn');
+  elements.directCustomReplyToggle = document.getElementById('direct-custom-reply-toggle');
+  elements.directCustomReplyText = document.getElementById('direct-custom-reply-text');
+  elements.directStatus = document.getElementById('direct-extension-status');
+  elements.directDeadlineInfo = document.getElementById('direct-deadline-info');
+  elements.directTimeOverride = document.getElementById('direct-time-override');
 }
 
 function bindEvents() {
@@ -51,6 +63,29 @@ function bindEvents() {
   elements.settingsToggle.addEventListener('click', toggleSettings);
   elements.scanForumBtn.addEventListener('click', scanForum);
   elements.modelOptions.addEventListener('change', handleModelChange);
+
+  elements.directDaysSelect.addEventListener('change', (e) => {
+    if (e.target.value === 'custom') {
+      elements.directCustomDays.classList.remove('hidden');
+      elements.directCustomDays.focus();
+    } else {
+      elements.directCustomDays.classList.add('hidden');
+    }
+  });
+  elements.directCustomReplyToggle.addEventListener('change', () => {
+    if (elements.directCustomReplyToggle.checked) {
+      elements.directCustomReplyText.classList.remove('hidden');
+      if (!elements.directCustomReplyText.value.trim() && directStudentName) {
+        const days = elements.directDaysSelect.value === 'custom'
+          ? (parseInt(elements.directCustomDays.value, 10) || 3)
+          : parseInt(elements.directDaysSelect.value, 10);
+        elements.directCustomReplyText.value = getDefaultReplyMessage(directStudentName, days);
+      }
+    } else {
+      elements.directCustomReplyText.classList.add('hidden');
+    }
+  });
+  elements.directGrantBtn.addEventListener('click', handleDirectGrant);
 }
 
 // ---- Settings & State Management ----
@@ -71,6 +106,9 @@ async function loadSavedState() {
     if (tab) {
       currentTabId = tab.id;
       currentForumUrl = tab.url;
+      if (tab.url && (tab.url.includes('/mod/forum/discuss.php') || tab.url.includes('/mod/forumng/discuss.php'))) {
+        await initDirectExtension(tab.id);
+      }
     }
 
     const { 
@@ -105,6 +143,7 @@ async function loadSavedState() {
     if (savedRequests && savedForumUrl && currentForumUrl === savedForumUrl) {
       extensionRequests = savedRequests;
       renderRequests();
+      fetchAndDisplayDeadlines();
       showStatus(elements.scanStatus, 'Loaded previous scan results.', 'info');
     } else if (savedRequests) {
         // Clear old results if on a new page
@@ -231,6 +270,7 @@ async function scanForum() {
     });
 
     renderRequests();
+    fetchAndDisplayDeadlines();
     const openCount = extensionRequests.filter(r => r.wantsExtension && !r.isAnswered).length;
     const answeredNote = answeredCount > 0 ? ` (${answeredCount} already answered, skipped)` : '';
     showStatus(elements.scanStatus,
@@ -283,6 +323,71 @@ function updateApiKeyInputForModel(model, storedKeys) {
   }
   elements.apiKeyInput.placeholder = placeholderText;
   elements.apiKeyInput.value = currentKey;
+}
+
+function getDefaultReplyMessage(studentName, days) {
+  const firstName = studentName.trim().split(/\s+/)[0];
+  return 'שלום ' + firstName + ', הוזנה לך הארכה של ' + days + ' ימים להגשת התרגיל. בהצלחה.';
+}
+
+function renderDeadlineText(result) {
+  if (!result || result.error) return 'Deadline: N/A';
+  if (result.noDeadline) return 'Deadline: not set';
+  return (result.isExtension ? 'Extension: ' : 'Deadline: ') + result.formatted;
+}
+
+async function initDirectExtension(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const AUTHOR_SELECTORS = [
+          'a[data-userid]', '.author-info a', '.author-info .d-flex a',
+          '.postprofile .author a', '.forumng-author a', '.forumng-name a',
+          '.author a', '.posting-author a', 'a[href*="user/view.php"]', 'h4 a',
+        ];
+        const POST_SELECTORS = [
+          'article.forum-post-container', 'article[data-post-id]',
+          '[data-region="post"]', 'div.forumpost', '.forumng-post',
+          'li.post', 'li.forumpost',
+        ];
+        let firstPost = null;
+        for (const sel of POST_SELECTORS) {
+          firstPost = document.querySelector(sel);
+          if (firstPost) break;
+        }
+        if (!firstPost) return null;
+        let authorEl = null;
+        for (const sel of AUTHOR_SELECTORS) {
+          try { authorEl = firstPost.querySelector(sel); } catch (e) { continue; }
+          if (authorEl) break;
+        }
+        return authorEl ? authorEl.textContent.trim() : null;
+      }
+    });
+
+    const studentName = results[0]?.result;
+    if (!studentName) return;
+
+    directStudentName = studentName;
+    elements.directStudentLabel.textContent = 'Student: ' + studentName;
+    elements.directDeadlineInfo.textContent = 'Deadline: loading...';
+    elements.directExtensionSection.classList.remove('hidden');
+
+    // Fetch deadline in background
+    chrome.scripting.executeScript({
+      target: { tabId },
+      func: _pageFetchAllDeadlines,
+      args: [[{ studentName, assignmentName: null, index: 0 }]]
+    }).then(res => {
+      if (elements.directDeadlineInfo)
+        elements.directDeadlineInfo.textContent = renderDeadlineText(res[0]?.result?.[0]);
+    }).catch(() => {
+      if (elements.directDeadlineInfo) elements.directDeadlineInfo.textContent = 'Deadline: N/A';
+    });
+  } catch (err) {
+    console.error('initDirectExtension failed:', err);
+  }
 }
 
 // Injected to extract posts AND the page title
@@ -454,7 +559,8 @@ function renderRequests() {
         ? `<div class="reason">Reason: ${escapeHtml(request.reason)}</div>`
         : '<div class="reason">No specific reason provided</div>'
       }
-      
+      <div class="deadline-info">Deadline: loading...</div>
+
       <div class="action-controls">
         <select class="days-select" data-index="${index}">
           <option value="3" ${initialDays === 3 ? 'selected' : ''}>3 Days</option>
@@ -463,9 +569,16 @@ function renderRequests() {
           <option value="custom" ${initialDays !== 3 && initialDays !== 7 ? 'selected' : ''}>Other...</option>
         </select>
         <input type="number" class="custom-days-input ${initialDays !== 3 && initialDays !== 7 ? '' : 'hidden'}" data-index="${index}" value="${initialDays}" min="1">
-        
+        <span class="time-separator">at</span>
+        <input type="time" class="time-override-input" data-index="${index}" title="Override submission time (leave blank to keep original)">
         <button class="btn btn-approve" data-action="approve" data-index="${index}">Approve</button>
         <button class="btn btn-reject" data-action="reject" data-index="${index}">Reject</button>
+      </div>
+      <div class="custom-reply-row">
+        <label class="custom-reply-toggle-label">
+          <input type="checkbox" class="custom-reply-checkbox" data-index="${index}"> Custom reply
+        </label>
+        <textarea class="custom-reply-textarea hidden" data-index="${index}" rows="3" dir="rtl" placeholder="Custom reply message..."></textarea>
       </div>
       <div class="actions" data-index="${index}"></div>
     `;
@@ -479,6 +592,22 @@ function renderRequests() {
         customInput.focus();
       } else {
         customInput.classList.add('hidden');
+      }
+    });
+
+    const customReplyCheckbox = card.querySelector('.custom-reply-checkbox');
+    const customReplyTextarea = card.querySelector('.custom-reply-textarea');
+    customReplyCheckbox.addEventListener('change', () => {
+      if (customReplyCheckbox.checked) {
+        customReplyTextarea.classList.remove('hidden');
+        if (!customReplyTextarea.value.trim()) {
+          const days = daysSelect.value === 'custom'
+            ? (parseInt(customInput.value, 10) || 3)
+            : parseInt(daysSelect.value, 10);
+          customReplyTextarea.value = getDefaultReplyMessage(request.studentName, days);
+        }
+      } else {
+        customReplyTextarea.classList.add('hidden');
       }
     });
 
@@ -546,6 +675,16 @@ async function executeApproval(index) {
   const customInput = card.querySelector('.custom-days-input');
   let finalDays = (daysSelect.value === 'custom') ? (parseInt(customInput.value, 10) || 3) : parseInt(daysSelect.value, 10);
 
+  const customReplyCheckbox = card.querySelector('.custom-reply-checkbox');
+  const customReplyTextarea = card.querySelector('.custom-reply-textarea');
+  const customMessage = (customReplyCheckbox?.checked && customReplyTextarea?.value.trim())
+    ? customReplyTextarea.value.trim()
+    : null;
+
+  const timeVal = card.querySelector('.time-override-input')?.value;
+  const customHour = timeVal ? parseInt(timeVal.split(':')[0], 10) : null;
+  const customMin  = timeVal ? parseInt(timeVal.split(':')[1], 10) : null;
+
   request.requestedDays = finalDays;
   actionsContainer.innerHTML = '<span class="status-label processing">Applying extension...</span>';
 
@@ -554,134 +693,8 @@ async function executeApproval(index) {
 
     const processRes = await chrome.scripting.executeScript({
       target: { tabId: currentTab.id },
-      func: async (studentName, assignmentName, daysToAdd) => {
-        try {
-          // 1. Extract Course URL
-          const navLinks = Array.from(document.querySelectorAll('.breadcrumb a, nav[aria-label="Breadcrumb"] a, nav[aria-label="נתיב"] a, .breadcrumb-nav a'));
-          const courseLink = navLinks.find(a => a.href.includes('course/view.php'));
-          if (!courseLink) throw new Error("Course URL not found.");
-          const courseUrl = courseLink.href;
-          const forumModuleId = new URLSearchParams(window.location.search).get('id');
-
-          // 2. Fetch course page to locate assignment URL
-          const courseResp = await fetch(courseUrl);
-          const courseHtml = await courseResp.text();
-          const courseDoc = new DOMParser().parseFromString(courseHtml, 'text/html');
-
-          let assignUrl = null;
-          if (forumModuleId) {
-            const forumEl = courseDoc.querySelector(`#module-${forumModuleId}, [id*="module-${forumModuleId}"]`);
-            if (forumEl) {
-              const section = forumEl.closest('li[id^="section-"], div[id^="section-"], .section.main, [data-sectionid]');
-              const sectionAssignLink = section?.querySelector('a[href*="mod/assign/view.php"]');
-              if (sectionAssignLink) assignUrl = sectionAssignLink.href;
-            }
-          }
-          if (!assignUrl) {
-            const links = Array.from(courseDoc.querySelectorAll('a[href*="mod/assign/view.php"]'));
-            if (links.length > 0) {
-              const searchName = assignmentName?.toLowerCase();
-              assignUrl = searchName && searchName !== "null" 
-                ? (links.find(l => l.textContent.toLowerCase().includes(searchName))?.href || links[0].href)
-                : links[0].href;
-            }
-          }
-          if (!assignUrl) throw new Error("Assignment link not found.");
-
-          // 3. Fetch grading page to extract user ID and sesskey
-          const gradingUrl = new URL(assignUrl);
-          gradingUrl.searchParams.set('action', 'grading');
-          const gradingResp = await fetch(gradingUrl.toString());
-          const gradingHtml = await gradingResp.text();
-          const gradingDoc = new DOMParser().parseFromString(gradingHtml, 'text/html');
-
-          const sesskey = gradingDoc.querySelector('input[name="sesskey"]')?.value;
-          let userid = null;
-          const normalized = studentName.toLowerCase().trim();
-          
-          for (const row of Array.from(gradingDoc.querySelectorAll('tr'))) {
-            const nameEls = Array.from(row.querySelectorAll('td a, td .fullname'));
-            if (nameEls.some(el => el.textContent.toLowerCase().includes(normalized))) {
-              const m = row.innerHTML.match(/[?&]userid=(\d+)/) || row.innerHTML.match(/[?&]id=(\d+)/);
-              if (m) { userid = m[1]; break; }
-            }
-          }
-          if (!userid || !sesskey) throw new Error(`Student not found in grading table.`);
-
-          // 4. Fetch grant extension page
-          const grantUrl = new URL(assignUrl);
-          grantUrl.searchParams.set('action', 'grantextension');
-          grantUrl.searchParams.set('userid', userid);
-          grantUrl.searchParams.set('sesskey', sesskey);
-
-          const grantResp = await fetch(grantUrl.toString());
-          const grantHtml = await grantResp.text();
-          const grantDoc = new DOMParser().parseFromString(grantHtml, 'text/html');
-
-          // Find specific date elements first by ID or name to avoid selecting a wrong search/header form
-          const dayEl = grantDoc.querySelector('#id_extensionduedate_day, [name="extensionduedate[day]"]');
-          const monthEl = grantDoc.querySelector('#id_extensionduedate_month, [name="extensionduedate[month]"]');
-          const yearEl = grantDoc.querySelector('#id_extensionduedate_year, [name="extensionduedate[year]"]');
-          
-          if (!dayEl || !monthEl || !yearEl) throw new Error("Date fields not found in form.");
-          
-          // Get the parent form of the date fields specifically
-          const form = dayEl.closest('form');
-          if (!form) throw new Error("Form wrapper not found for date fields.");
-
-          const hourEl = grantDoc.querySelector('#id_extensionduedate_hour, [name="extensionduedate[hour]"]');
-          const minEl = grantDoc.querySelector('#id_extensionduedate_minute, [name="extensionduedate[minute]"]');
-
-          const formData = new FormData(form);
-
-          const year = parseInt(yearEl.value);
-          const month = parseInt(monthEl.value) - 1;
-          const day = parseInt(dayEl.value);
-          const hour = hourEl ? parseInt(hourEl.value) : 23;
-          const min = minEl ? parseInt(minEl.value) : 59;
-
-          // Calculate new date
-          const target = new Date(year, month, day, hour, min);
-          target.setDate(target.getDate() + daysToAdd);
-
-          // Force set the new enabled date properties in the payload
-          formData.set('extensionduedate[enabled]', '1');
-          formData.set('extensionduedate[year]', target.getFullYear());
-          formData.set('extensionduedate[month]', target.getMonth() + 1);
-          formData.set('extensionduedate[day]', target.getDate());
-          formData.set('extensionduedate[hour]', target.getHours());
-          formData.set('extensionduedate[minute]', target.getMinutes());
-
-          const submitBtn = form.querySelector('input[type="submit"], button[type="submit"], #id_submitbutton');
-          if (submitBtn && submitBtn.name) formData.set(submitBtn.name, submitBtn.value || 'Save changes');
-          else formData.set('submitbutton', 'Save changes');
-
-          // Convert FormData to URLSearchParams to force application/x-www-form-urlencoded
-          const urlEncodedData = new URLSearchParams();
-          for (const [key, value] of formData.entries()) {
-              urlEncodedData.append(key, value);
-          }
-
-          const actionUrl = new URL(form.getAttribute('action') || grantUrl.toString(), window.location.href);
-
-          // 5. Submit the extension via POST
-          const postResp = await fetch(actionUrl.toString(), { 
-              method: 'POST', 
-              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-              body: urlEncodedData 
-          });
-          
-          const postHtmlText = await postResp.text();
-          if (postHtmlText.includes('class="error"') || postHtmlText.includes('invalid-feedback')) {
-              throw new Error("Server rejected the extension form.");
-          }
-
-          return { success: true, sesskey, grantUrl: grantUrl.toString() };
-        } catch (err) {
-          return { success: false, error: err.message };
-        }
-      },
-      args: [request.studentName, request.assignmentName, finalDays]
+      func: _pageGrantExtension,
+      args: [request.studentName, request.assignmentName, finalDays, customHour, customMin]
     });
 
     const extensionResult = processRes[0]?.result;
@@ -691,7 +704,7 @@ async function executeApproval(index) {
 
     actionsContainer.innerHTML = '<span class="status-label processing">Posting forum reply...</span>';
     
-    const replyResult = await postForumReply(currentTab.id, request, finalDays, extensionResult.sesskey);
+    const replyResult = await postForumReply(currentTab.id, request, finalDays, extensionResult.sesskey, customMessage);
 
     if (replyResult.success) {
       actionsContainer.innerHTML = `<span class="status-label approved">Approved for ${finalDays} days · Reply posted</span>`;
@@ -702,34 +715,7 @@ async function executeApproval(index) {
       // Rollback logic handling
       await chrome.scripting.executeScript({
          target: { tabId: currentTab.id },
-         func: async (grantUrlStr) => {
-             try {
-                 const resp = await fetch(grantUrlStr);
-                 const html = await resp.text();
-                 const doc = new DOMParser().parseFromString(html, 'text/html');
-                 
-                 const dayEl = doc.querySelector('#id_extensionduedate_day, [name="extensionduedate[day]"]');
-                 if(!dayEl) return;
-                 const form = dayEl.closest('form');
-                 if(form) {
-                     const fd = new FormData(form);
-                     fd.set('extensionduedate[enabled]', '0'); // Explicitly disable extension
-                     const btn = form.querySelector('input[type="submit"], #id_submitbutton');
-                     if(btn && btn.name) fd.set(btn.name, btn.value || 'Save changes');
-                     else fd.set('submitbutton', 'Save changes');
-                     
-                     const params = new URLSearchParams();
-                     for (const [k, v] of fd.entries()) params.append(k, v);
-                     
-                     const actionUrl = new URL(form.getAttribute('action') || grantUrlStr, window.location.href);
-                     await fetch(actionUrl.toString(), { 
-                         method: 'POST', 
-                         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                         body: params 
-                     });
-                 }
-             } catch(e) {}
-         },
+         func: _pageRollbackExtension,
          args: [extensionResult.grantUrl]
       });
       
@@ -742,12 +728,304 @@ async function executeApproval(index) {
   }
 }
 
-async function postForumReply(tabId, request, days, sesskey) {
+// Runs in page context — fetches current deadlines for multiple students in one shot
+async function _pageFetchAllDeadlines(studentInfos) {
+  const pad = n => String(n).padStart(2, '0');
+  try {
+    const navLinks = Array.from(document.querySelectorAll(
+      '.breadcrumb a, nav[aria-label="Breadcrumb"] a, nav[aria-label="נתיב"] a, .breadcrumb-nav a'
+    ));
+    const courseLink = navLinks.find(a => a.href.includes('course/view.php'));
+    if (!courseLink) return studentInfos.map(s => ({ index: s.index, error: 'Course URL not found' }));
+    const courseUrl = courseLink.href;
+
+    // On discuss.php there's no ?id=, so check breadcrumb for the forum view link
+    let forumModuleId = new URLSearchParams(window.location.search).get('id');
+    if (!forumModuleId) {
+      const forumViewLink = navLinks.find(
+        a => a.href.includes('/mod/forumng/view.php') || a.href.includes('/mod/forum/view.php')
+      );
+      if (forumViewLink) forumModuleId = new URL(forumViewLink.href).searchParams.get('id');
+    }
+
+    const courseResp = await fetch(courseUrl);
+    const courseHtml = await courseResp.text();
+    const courseDoc = new DOMParser().parseFromString(courseHtml, 'text/html');
+
+    const firstAssignmentName = studentInfos[0]?.assignmentName;
+    let assignUrl = null;
+    if (forumModuleId) {
+      const forumEl = courseDoc.querySelector(`#module-${forumModuleId}, [id*="module-${forumModuleId}"]`);
+      if (forumEl) {
+        const section = forumEl.closest('li[id^="section-"], div[id^="section-"], .section.main, [data-sectionid]');
+        const link = section?.querySelector('a[href*="mod/assign/view.php"]');
+        if (link) assignUrl = link.href;
+      }
+    }
+    if (!assignUrl) {
+      const links = Array.from(courseDoc.querySelectorAll('a[href*="mod/assign/view.php"]'));
+      if (links.length > 0) {
+        const searchName = firstAssignmentName?.toLowerCase();
+        assignUrl = searchName && searchName !== 'null'
+          ? (links.find(l => l.textContent.toLowerCase().includes(searchName))?.href || links[0].href)
+          : links[0].href;
+      }
+    }
+    if (!assignUrl) return studentInfos.map(s => ({ index: s.index, error: 'Assignment not found' }));
+
+    const gradingUrl = new URL(assignUrl);
+    gradingUrl.searchParams.set('action', 'grading');
+    const gradingResp = await fetch(gradingUrl.toString());
+    const gradingHtml = await gradingResp.text();
+    const gradingDoc = new DOMParser().parseFromString(gradingHtml, 'text/html');
+
+    const sesskey = gradingDoc.querySelector('input[name="sesskey"]')?.value;
+    if (!sesskey) return studentInfos.map(s => ({ index: s.index, error: 'No sesskey found' }));
+
+    const userIds = {};
+    for (const { studentName, index } of studentInfos) {
+      const normalized = studentName.toLowerCase().trim();
+      for (const row of Array.from(gradingDoc.querySelectorAll('tr'))) {
+        const nameEls = Array.from(row.querySelectorAll('td a, td .fullname'));
+        if (nameEls.some(el => el.textContent.toLowerCase().includes(normalized))) {
+          const m = row.innerHTML.match(/[?&]userid=(\d+)/) || row.innerHTML.match(/[?&]id=(\d+)/);
+          if (m) { userIds[index] = m[1]; break; }
+        }
+      }
+    }
+
+    const results = await Promise.all(studentInfos.map(async ({ index }) => {
+      const userid = userIds[index];
+      if (!userid) return { index, error: 'Student not found' };
+      try {
+        const grantUrl = new URL(assignUrl);
+        grantUrl.searchParams.set('action', 'grantextension');
+        grantUrl.searchParams.set('userid', userid);
+        grantUrl.searchParams.set('sesskey', sesskey);
+
+        const grantResp = await fetch(grantUrl.toString());
+        const grantHtml = await grantResp.text();
+        const grantDoc = new DOMParser().parseFromString(grantHtml, 'text/html');
+
+        const dayEl   = grantDoc.querySelector('#id_extensionduedate_day, [name="extensionduedate[day]"]');
+        const monthEl = grantDoc.querySelector('#id_extensionduedate_month, [name="extensionduedate[month]"]');
+        const yearEl  = grantDoc.querySelector('#id_extensionduedate_year, [name="extensionduedate[year]"]');
+        const hourEl  = grantDoc.querySelector('#id_extensionduedate_hour, [name="extensionduedate[hour]"]');
+        const minEl   = grantDoc.querySelector('#id_extensionduedate_minute, [name="extensionduedate[minute]"]');
+        const enabledEl = grantDoc.querySelector('#id_extensionduedate_enabled, [name="extensionduedate[enabled]"]');
+
+        if (!dayEl || !monthEl || !yearEl) return { index, error: 'Date fields not found' };
+
+        const year  = parseInt(yearEl.value)  || 0;
+        const month = parseInt(monthEl.value) || 0;
+        const day   = parseInt(dayEl.value)   || 0;
+        const hour  = parseInt(hourEl?.value) || 0;
+        const min   = parseInt(minEl?.value)  || 0;
+        const isExtension = enabledEl ? (enabledEl.checked || enabledEl.value === '1') : false;
+
+        if (year < 2000 || day < 1) return { index, noDeadline: true };
+
+        const formatted = `${pad(day)}/${pad(month)}/${year} ${pad(hour)}:${pad(min)}`;
+        return { index, formatted, isExtension };
+      } catch (err) {
+        return { index, error: err.message };
+      }
+    }));
+
+    return results;
+  } catch (err) {
+    return studentInfos.map(s => ({ index: s.index, error: err.message }));
+  }
+}
+
+async function fetchAndDisplayDeadlines() {
+  if (!currentTabId) return;
+
+  const studentInfos = extensionRequests.reduce((acc, req, idx) => {
+    if (req.wantsExtension && !req.isAnswered)
+      acc.push({ studentName: req.studentName, assignmentName: req.assignmentName, index: idx });
+    return acc;
+  }, []);
+
+  if (studentInfos.length === 0) return;
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: currentTabId },
+      func: _pageFetchAllDeadlines,
+      args: [studentInfos]
+    });
+
+    for (const result of (results[0]?.result || [])) {
+      const card = elements.requestsList.querySelector(`[data-index="${result.index}"]`);
+      const deadlineEl = card?.querySelector('.deadline-info');
+      if (deadlineEl) deadlineEl.textContent = renderDeadlineText(result);
+    }
+  } catch (_) {
+    elements.requestsList.querySelectorAll('.deadline-info').forEach(el => {
+      el.textContent = 'Deadline: N/A';
+    });
+  }
+}
+
+// Runs in page context via chrome.scripting.executeScript
+async function _pageGrantExtension(studentName, assignmentName, daysToAdd, customHour = null, customMin = null) {
+  try {
+    const navLinks = Array.from(document.querySelectorAll('.breadcrumb a, nav[aria-label="Breadcrumb"] a, nav[aria-label="נתיב"] a, .breadcrumb-nav a'));
+    const courseLink = navLinks.find(a => a.href.includes('course/view.php'));
+    if (!courseLink) throw new Error("Course URL not found.");
+    const courseUrl = courseLink.href;
+    let forumModuleId = new URLSearchParams(window.location.search).get('id');
+    if (!forumModuleId) {
+      const forumViewLink = navLinks.find(
+        a => a.href.includes('/mod/forumng/view.php') || a.href.includes('/mod/forum/view.php')
+      );
+      if (forumViewLink) forumModuleId = new URL(forumViewLink.href).searchParams.get('id');
+    }
+
+    const courseResp = await fetch(courseUrl);
+    const courseHtml = await courseResp.text();
+    const courseDoc = new DOMParser().parseFromString(courseHtml, 'text/html');
+
+    let assignUrl = null;
+    if (forumModuleId) {
+      const forumEl = courseDoc.querySelector(`#module-${forumModuleId}, [id*="module-${forumModuleId}"]`);
+      if (forumEl) {
+        const section = forumEl.closest('li[id^="section-"], div[id^="section-"], .section.main, [data-sectionid]');
+        const sectionAssignLink = section?.querySelector('a[href*="mod/assign/view.php"]');
+        if (sectionAssignLink) assignUrl = sectionAssignLink.href;
+      }
+    }
+    if (!assignUrl) {
+      const links = Array.from(courseDoc.querySelectorAll('a[href*="mod/assign/view.php"]'));
+      if (links.length > 0) {
+        const searchName = assignmentName?.toLowerCase();
+        assignUrl = searchName && searchName !== "null"
+          ? (links.find(l => l.textContent.toLowerCase().includes(searchName))?.href || links[0].href)
+          : links[0].href;
+      }
+    }
+    if (!assignUrl) throw new Error("Assignment link not found.");
+
+    const gradingUrl = new URL(assignUrl);
+    gradingUrl.searchParams.set('action', 'grading');
+    const gradingResp = await fetch(gradingUrl.toString());
+    const gradingHtml = await gradingResp.text();
+    const gradingDoc = new DOMParser().parseFromString(gradingHtml, 'text/html');
+
+    const sesskey = gradingDoc.querySelector('input[name="sesskey"]')?.value;
+    let userid = null;
+    const normalized = studentName.toLowerCase().trim();
+
+    for (const row of Array.from(gradingDoc.querySelectorAll('tr'))) {
+      const nameEls = Array.from(row.querySelectorAll('td a, td .fullname'));
+      if (nameEls.some(el => el.textContent.toLowerCase().includes(normalized))) {
+        const m = row.innerHTML.match(/[?&]userid=(\d+)/) || row.innerHTML.match(/[?&]id=(\d+)/);
+        if (m) { userid = m[1]; break; }
+      }
+    }
+    if (!userid || !sesskey) throw new Error("Student not found in grading table.");
+
+    const grantUrl = new URL(assignUrl);
+    grantUrl.searchParams.set('action', 'grantextension');
+    grantUrl.searchParams.set('userid', userid);
+    grantUrl.searchParams.set('sesskey', sesskey);
+
+    const grantResp = await fetch(grantUrl.toString());
+    const grantHtml = await grantResp.text();
+    const grantDoc = new DOMParser().parseFromString(grantHtml, 'text/html');
+
+    const dayEl = grantDoc.querySelector('#id_extensionduedate_day, [name="extensionduedate[day]"]');
+    const monthEl = grantDoc.querySelector('#id_extensionduedate_month, [name="extensionduedate[month]"]');
+    const yearEl = grantDoc.querySelector('#id_extensionduedate_year, [name="extensionduedate[year]"]');
+
+    if (!dayEl || !monthEl || !yearEl) throw new Error("Date fields not found in form.");
+
+    const form = dayEl.closest('form');
+    if (!form) throw new Error("Form wrapper not found for date fields.");
+
+    const hourEl = grantDoc.querySelector('#id_extensionduedate_hour, [name="extensionduedate[hour]"]');
+    const minEl = grantDoc.querySelector('#id_extensionduedate_minute, [name="extensionduedate[minute]"]');
+
+    const formData = new FormData(form);
+
+    const year = parseInt(yearEl.value);
+    const month = parseInt(monthEl.value) - 1;
+    const day = parseInt(dayEl.value);
+    const hour = customHour !== null ? customHour : (hourEl ? parseInt(hourEl.value) : 23);
+    const min  = customMin  !== null ? customMin  : (minEl  ? parseInt(minEl.value)  : 59);
+
+    const target = new Date(year, month, day, hour, min);
+    target.setDate(target.getDate() + daysToAdd);
+
+    formData.set('extensionduedate[enabled]', '1');
+    formData.set('extensionduedate[year]', target.getFullYear());
+    formData.set('extensionduedate[month]', target.getMonth() + 1);
+    formData.set('extensionduedate[day]', target.getDate());
+    formData.set('extensionduedate[hour]', target.getHours());
+    formData.set('extensionduedate[minute]', target.getMinutes());
+
+    const submitBtn = form.querySelector('input[type="submit"], button[type="submit"], #id_submitbutton');
+    if (submitBtn && submitBtn.name) formData.set(submitBtn.name, submitBtn.value || 'Save changes');
+    else formData.set('submitbutton', 'Save changes');
+
+    const urlEncodedData = new URLSearchParams();
+    for (const [key, value] of formData.entries()) urlEncodedData.append(key, value);
+
+    const actionUrl = new URL(form.getAttribute('action') || grantUrl.toString(), window.location.href);
+
+    const postResp = await fetch(actionUrl.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: urlEncodedData
+    });
+
+    const postHtmlText = await postResp.text();
+    if (postHtmlText.includes('class="error"') || postHtmlText.includes('invalid-feedback')) {
+      throw new Error("Server rejected the extension form.");
+    }
+
+    return { success: true, sesskey, grantUrl: grantUrl.toString() };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// Runs in page context via chrome.scripting.executeScript
+async function _pageRollbackExtension(grantUrlStr) {
+  try {
+    const resp = await fetch(grantUrlStr);
+    const html = await resp.text();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+
+    const dayEl = doc.querySelector('#id_extensionduedate_day, [name="extensionduedate[day]"]');
+    if (!dayEl) return;
+    const form = dayEl.closest('form');
+    if (!form) return;
+
+    const fd = new FormData(form);
+    fd.set('extensionduedate[enabled]', '0');
+    const btn = form.querySelector('input[type="submit"], #id_submitbutton');
+    if (btn && btn.name) fd.set(btn.name, btn.value || 'Save changes');
+    else fd.set('submitbutton', 'Save changes');
+
+    const params = new URLSearchParams();
+    for (const [k, v] of fd.entries()) params.append(k, v);
+
+    const actionUrl = new URL(form.getAttribute('action') || grantUrlStr, window.location.href);
+    await fetch(actionUrl.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params
+    });
+  } catch (e) {}
+}
+
+async function postForumReply(tabId, request, days, sesskey, customMessage = null) {
   try {
     if (!request.discussUrl) return { success: false, error: 'Discussion URL not found.' };
 
-    const firstName = request.studentName.trim().split(/\s+/)[0];
-    const msgStr = '\u05e9\u05dc\u05d5\u05dd ' + firstName + ', \u05d4\u05d5\u05d6\u05e0\u05d4 \u05dc\u05da \u05d4\u05d0\u05e8\u05db\u05d4 \u05e9\u05dc ' + days + ' \u05d9\u05de\u05d9\u05dd \u05dc\u05d4\u05d2\u05e9\u05ea \u05d4\u05ea\u05e8\u05d2\u05d9\u05dc. \u05d1\u05d4\u05e6\u05dc\u05d7\u05d4.';
+    const msgStr = customMessage || getDefaultReplyMessage(request.studentName, days);
 
     const replyRes = await chrome.scripting.executeScript({
       target: { tabId: tabId },
@@ -819,6 +1097,63 @@ async function postForumReply(tabId, request, days, sesskey) {
 
 
 
+
+async function handleDirectGrant() {
+  if (!directStudentName) return;
+
+  const daysSelect = elements.directDaysSelect;
+  const finalDays = daysSelect.value === 'custom'
+    ? (parseInt(elements.directCustomDays.value, 10) || 3)
+    : parseInt(daysSelect.value, 10);
+
+  const assignmentName = elements.directAssignmentName.value.trim() || null;
+  const customMessage = (elements.directCustomReplyToggle.checked && elements.directCustomReplyText.value.trim())
+    ? elements.directCustomReplyText.value.trim()
+    : null;
+
+  const timeVal = elements.directTimeOverride?.value;
+  const customHour = timeVal ? parseInt(timeVal.split(':')[0], 10) : null;
+  const customMin  = timeVal ? parseInt(timeVal.split(':')[1], 10) : null;
+
+  elements.directGrantBtn.disabled = true;
+  elements.directStatus.innerHTML = '<span class="status-label processing">Applying extension...</span>';
+
+  try {
+    const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+    const processRes = await chrome.scripting.executeScript({
+      target: { tabId: currentTab.id },
+      func: _pageGrantExtension,
+      args: [directStudentName, assignmentName, finalDays, customHour, customMin]
+    });
+
+    const extensionResult = processRes[0]?.result;
+    if (!extensionResult || !extensionResult.success) {
+      throw new Error(extensionResult?.error || "Failed to process extension.");
+    }
+
+    elements.directStatus.innerHTML = '<span class="status-label processing">Posting forum reply...</span>';
+
+    const request = { studentName: directStudentName, assignmentName, discussUrl: currentTab.url };
+    const replyResult = await postForumReply(currentTab.id, request, finalDays, extensionResult.sesskey, customMessage);
+
+    if (replyResult.success) {
+      elements.directStatus.innerHTML = `<span class="status-label approved">Granted for ${finalDays} days · Reply posted</span>`;
+    } else {
+      elements.directStatus.innerHTML = '<span class="status-label processing">Reply failed. Rolling back...</span>';
+      await chrome.scripting.executeScript({
+        target: { tabId: currentTab.id },
+        func: _pageRollbackExtension,
+        args: [extensionResult.grantUrl]
+      });
+      elements.directStatus.innerHTML = `<span class="status-label rejected">Error: ${replyResult.error}. Extension cancelled.</span>`;
+      elements.directGrantBtn.disabled = false;
+    }
+  } catch (err) {
+    elements.directStatus.innerHTML = `<span class="status-label rejected">Error: ${err.message}</span>`;
+    elements.directGrantBtn.disabled = false;
+  }
+}
 
 async function handleReject(index) {
   const card = elements.requestsList.querySelector(`[data-index="${index}"]`);
