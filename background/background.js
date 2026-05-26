@@ -8,7 +8,7 @@ const ANTHROPIC_MODEL = 'claude-3-5-sonnet-20241022';
 const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
 const OPENAI_MODEL = 'gpt-4o'; 
 
-const GEMINI_MODEL = 'gemini-3.1-flash-lite-preview';
+const GEMINI_MODEL = 'gemini-3.1-flash-lite';
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 const SYSTEM_PROMPT = `Analyze the following Moodle forum posts. Posts may be written in any language, including Hebrew. For each post, identify if the student is asking for an assignment extension.
